@@ -1,0 +1,8 @@
+CLAUDE.md
+pyproject.toml
+linear_transformer/__init__.py
+linear_transformer.egg-info/PKG-INFO
+linear_transformer.egg-info/SOURCES.txt
+linear_transformer.egg-info/dependency_links.txt
+linear_transformer.egg-info/requires.txt
+linear_transformer.egg-info/top_level.txt

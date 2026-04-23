@@ -1,0 +1,63 @@
+from __future__ import annotations
+
+import torch
+
+class BilinearMul(torch.autograd.Function):
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., d)
+        y: torch.Tensor,  # (..., d)
+    ) -> torch.Tensor:  # (..., d)
+        orig_dtype = x.dtype
+        ctx.save_for_backward(x, y)
+        ctx._orig_dtype = orig_dtype
+        return (x.float() * y.float()).to(orig_dtype)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # (..., d)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x, y = ctx.saved_tensors
+        t_f = grad_t.float()
+        grad_x = (0.5 * t_f * y.float()).to(ctx._orig_dtype)
+        grad_y = (0.5 * t_f * x.float()).to(ctx._orig_dtype)
+        return grad_x, grad_y
+    
+class BilinearMatmul(torch.autograd.Function):
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., d)
+        y: torch.Tensor,  # (..., d)
+    ) -> torch.Tensor:  # (..., d)
+        orig_dtype = x.dtype
+        ctx.save_for_backward(x, y)
+        ctx._orig_dtype = orig_dtype
+        return torch.matmul(x.float(), y.float()).to(orig_dtype)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # (..., d)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x, y = ctx.saved_tensors
+        t_f = grad_t.float()
+        grad_x = (0.5 * torch.matmul(t_f, y.float().mT)).to(ctx._orig_dtype)
+        grad_y = (0.5 * torch.matmul(x.float().mT, t_f)).to(ctx._orig_dtype)
+        return grad_x, grad_y
+
+
+# ---------------------------------------------------------------------------
+# Functional wrappers
+# ---------------------------------------------------------------------------
+
+def bilinear_mul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return BilinearMul.apply(x, y)
+
+
+def bilinear_matmul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return BilinearMatmul.apply(x, y)
