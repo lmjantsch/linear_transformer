@@ -1,0 +1,6 @@
+# folders
+*.egg-info/
+.pytest_cache/
+.vscode/
+.claude/
+__pycache__/

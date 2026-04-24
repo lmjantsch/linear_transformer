@@ -1,7 +1,0 @@
-torch>=2.0
-transformers>=4.30
-nnsight>=0.1.0
-
-[dev]
-pytest>=7.0
-pytest-cov
