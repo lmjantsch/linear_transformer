@@ -36,6 +36,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="softmax implementation to use (e.g. softmax, dtd_softmax)"
     )
     parser.addoption(
+        "--matmul_fn",
+        default='bilinear_matmul',
+        help="Bilinear matmul for QK and AV products (e.g. bilinear_matmul, matmul).",
+    )
+    parser.addoption(
+        "--mul_fn",
+        default='bilinear_mul',
+        help="Bilinear element-wise mul for gated MLPs (e.g. bilinear_mul, mul).",
+    )
+    parser.addoption(
+        "--mlp_act_fn",
+        default=None,
+        help="MLP activation key (e.g. secant_silu, secant_gelu_tanh). Defaults to model-specific LVP activation.",
+    )
+    parser.addoption(
+        "--frozen_norm",
+        default='true',
+        help="Freeze normalisation factors in norms (true/false).",
+    )
+    parser.addoption(
+        "--attn_softcap_fn",
+        default='secant_tanh',
+        help="Softcap activation for Gemma2 logit softcapping (e.g. secant_tanh, tanh).",
+    )
+    parser.addoption(
         "--extended",
         action="store_true",
         default=False,
@@ -52,22 +77,27 @@ def model_id(request: pytest.FixtureRequest) -> str:
 
 @pytest.fixture(scope="session")
 def attn_act_fn(request: pytest.FixtureRequest) -> str:
-    option = request.config.getoption("--attn_act_fn")
-    if option == 'dtd_softmax':
-        return dtd_softmax
-    if option == 'secant_softmax':
-        return secant_softmax
-    if option == 'constant_softmax':
-        return constant_softmax
-    if option == 'pos_ratio_softmax':
-        return pos_ratio_softmax
-    if option == 'integrated_softmax':
-        return integrated_softmax
-    if option == 'sec_jac_softmax':
-        return sec_jac_softmax
-    if option == 'softmax':
-        return F.softmax
-    raise NotImplementedError(f"Softmax function '{option}' is not implemented.")
+    return request.config.getoption("--attn_act_fn")
+
+@pytest.fixture(scope="session")
+def matmul_fn(request: pytest.FixtureRequest) -> str:
+    return request.config.getoption("--matmul_fn")
+
+@pytest.fixture(scope="session")
+def mul_fn(request: pytest.FixtureRequest) -> str:
+    return request.config.getoption("--mul_fn")
+
+@pytest.fixture(scope="session")
+def mlp_act_fn(request: pytest.FixtureRequest) -> str | None:
+    return request.config.getoption("--mlp_act_fn")
+
+@pytest.fixture(scope="session")
+def frozen_norm(request: pytest.FixtureRequest) -> bool:
+    return request.config.getoption("--frozen_norm").lower() == 'true'
+
+@pytest.fixture(scope="session")
+def attn_softcap_fn(request: pytest.FixtureRequest) -> str:
+    return request.config.getoption("--attn_softcap_fn")
 
 @pytest.fixture(scope="session")
 def extended(request: pytest.FixtureRequest) -> bool:

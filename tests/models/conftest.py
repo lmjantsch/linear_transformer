@@ -85,12 +85,24 @@ def org_model_cache(model_id: str, device: torch.device, dtype: torch.dtype, bat
 
 @pytest.fixture(scope="session")
 def patched_model_cache(
-    model_id: str, device: torch.device, dtype: torch.dtype, batch_inputs: dict, attn_act_fn: callable
+    model_id: str, device: torch.device, dtype: torch.dtype, batch_inputs: dict,
+    attn_act_fn: str, matmul_fn: str, mul_fn: str, mlp_act_fn: str | None,
+    frozen_norm: bool, attn_softcap_fn: str,
 ) -> dict:
+    lvp_kwargs: dict = {
+        'attn_act_fn': attn_act_fn,
+        'matmul_fn': matmul_fn,
+        'mul_fn': mul_fn,
+        'frozen_norm': frozen_norm,
+        'attn_softcap_fn': attn_softcap_fn,
+    }
+    if mlp_act_fn is not None:
+        lvp_kwargs['mlp_act_fn'] = mlp_act_fn
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, attn_implementation='eager'
     ).to(device).eval()
-    model = patch_model_for_lvp(model, attn_act_fn=attn_act_fn)
+    model = patch_model_for_lvp(model, **lvp_kwargs)
     arc = get_arch(model_id)
     layers = arc.layers(model)
     num_layers = len(layers)

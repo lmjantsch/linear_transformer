@@ -19,7 +19,6 @@ def _secant_denom(x: torch.Tensor, eps: float) -> torch.Tensor:
 # Rule 2 variants — zero-preserving nonlinearities
 # ---------------------------------------------------------------------------
 
-
 class SecantGELU(torch.autograd.Function):
     """Rule 2 — GELU (erf formulation).
 
@@ -399,3 +398,31 @@ def sec_jac_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.f
 
 def constant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return F.softmax(x, dim=dim, dtype=dtype).detach()
+
+
+# ---------------------------------------------------------------------------
+# Mapping wrappers
+# ---------------------------------------------------------------------------
+
+ACT_FN = {
+    # Standard activations
+    'gelu':           F.gelu,
+    'gelu_tanh':      lambda x: F.gelu(x, approximate='tanh'),
+    'silu':           F.silu,
+    'relu':           F.relu,
+    'tanh':           torch.tanh,
+    'softmax':        F.softmax,
+    # Rule 2 — zero-preserving (LVP secant)
+    'secant_gelu':      secant_gelu,
+    'secant_gelu_tanh': secant_gelu_tanh,
+    'secant_silu':      secant_silu,
+    'secant_relu':      secant_relu,
+    'secant_tanh':      secant_tanh,
+    # Rule 3 — softmax variants (LVP)
+    'dtd_softmax':        dtd_softmax,
+    'sec_jac_softmax':    sec_jac_softmax,
+    'integrated_softmax': integrated_softmax,
+    'secant_softmax':     secant_softmax,
+    'pos_ratio_softmax':  pos_ratio_softmax,
+    'constant_softmax':   constant_softmax,
+}

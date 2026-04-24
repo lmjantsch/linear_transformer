@@ -11,45 +11,57 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import repeat_kv, apply_rotary_pos_emb
 
+from linear_transformer.modules import ACT_FN, BILINEAR_FN
 from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax, secant_tanh
 from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 
 class FrozenGemma2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float) -> None:
+    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = True) -> None:
         super().__init__()
         self.weight = weight
         self.eps = eps
+        self.frozen_norm = frozen_norm
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2RMSNorm:
-        return cls(weight=m.weight, eps=m.eps)
+        return cls(weight=m.weight, eps=m.eps, frozen_norm=kwargs.get('frozen_norm', True))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         x_f = x.float()
         rms = x_f.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()  # (B, N, 1)
-        w = ((1.0 + self.weight.float()) / rms).detach()  # (B, N, d_model) — effective linear weight, detache to freeze
+        w = (1.0 + self.weight.float()) / rms
+        if self.frozen_norm:
+            w = w.detach()  # (B, N, d_model) — effective linear weight, detach to freeze
 
         out = (x_f * w).to(x.dtype)
         return out
 
 class FrozenGemma2GeGLU(nn.Module):
 
-    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, **kwargs) -> None:
+    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn=secant_gelu_tanh, mul_fn=bilinear_mul) -> None:
         super().__init__()
         self.gate_proj = gate_proj   # (d_ffn, d_model)
         self.up_proj = up_proj       # (d_ffn, d_model)
         self.down_proj = down_proj   # (d_model, d_ffn)
+        self.act_fn = act_fn
+        self.mul_fn = mul_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2GeGLU:
-        return cls(gate_proj=m.gate_proj, up_proj=m.up_proj, down_proj=m.down_proj, **kwargs)
+        return cls(
+            gate_proj=m.gate_proj,
+            up_proj=m.up_proj,
+            down_proj=m.down_proj,
+            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'secant_gelu_tanh')],
+            mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'bilinear_mul')],
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         gate_pre = self.gate_proj(x)
-        gate = secant_gelu_tanh(gate_pre)
+        gate = self.act_fn(gate_pre)
         up = self.up_proj(x)
-        hidden = bilinear_mul(gate, up)
+        hidden = self.mul_fn(gate, up)
         out = self.down_proj(hidden)
         return out
 
@@ -59,7 +71,6 @@ def eager_attention_forward(
     key: torch.Tensor,
     value: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    act_fn: callable,
     dropout: float | int = 0.0,
     scaling: float | None = None,
     softcap: float | None = None,
@@ -71,22 +82,22 @@ def eager_attention_forward(
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
 
-    attn_weights = bilinear_matmul(query, key_states.transpose(2, 3)) * scaling
+    attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
 
     if softcap is not None:
         attn_weights = attn_weights / softcap
-        attn_weights = secant_tanh(attn_weights)
+        attn_weights = module.attn_softcap_fn(attn_weights)
         attn_weights = attn_weights * softcap
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
     # upcast attention to fp32
-    attn_weights = act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)\
+    attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
     if not attn_weights.grad_fn: # attention is dealt as constant if not part of the gradient graph
         attn_output = torch.matmul(attn_weights, value_states)
     else:
-        attn_output = bilinear_matmul(attn_weights, value_states)
+        attn_output = module.matmul_fn(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
@@ -112,17 +123,21 @@ class FrozenGemma2Attention(nn.Module):
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
         self.attn_act_fn = kwargs.get('attn_act_fn', dtd_softmax)
+        self.matmul_fn = kwargs.get('matmul_fn', bilinear_matmul)
+        self.attn_softcap_fn = kwargs.get('attn_softcap_fn', secant_tanh)
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2Attention:
         return cls(
-            config = m.config,
-            layer_idx = m.layer_idx,
-            q_proj = m.q_proj,
-            k_proj = m.k_proj,
-            v_proj = m.v_proj,
-            o_proj = m.o_proj,
-            **kwargs
+            config=m.config,
+            layer_idx=m.layer_idx,
+            q_proj=m.q_proj,
+            k_proj=m.k_proj,
+            v_proj=m.v_proj,
+            o_proj=m.o_proj,
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'dtd_softmax')],
+            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'bilinear_matmul')],
+            attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'secant_tanh')],
         )
 
     def forward(
@@ -153,7 +168,6 @@ class FrozenGemma2Attention(nn.Module):
             key_states,
             value_states,
             attention_mask,
-            self.attn_act_fn,
             dropout=self.attention_dropout if self.training else 0.0,
             scaling=self.scaling,
             sliding_window=self.sliding_window,

@@ -7,38 +7,44 @@ from transformers.pytorch_utils import Conv1D
 from transformers.cache_utils import Cache, EncoderDecoderCache
 from transformers.utils.generic import maybe_autocast
 
+from linear_transformer.modules import ACT_FN, BILINEAR_FN
 from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax
 from linear_transformer.modules.bilinear import bilinear_matmul
 
 class FrozenGPT2MLP(nn.Module):
 
-    def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, **kwargs) -> None:
+    def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, act_fn=secant_gelu_tanh) -> None:
         super().__init__()
         self.c_fc = c_fc    # (d_model, d_ffn)
         self.c_proj = c_proj  # (d_ffn, d_model)
+        self.act_fn = act_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2MLP:
         # GPT-2 MLP uses c_fc and c_proj (Conv1D, weight transposed vs nn.Linear)
-        return cls(c_fc=m.c_fc, c_proj=m.c_proj, **kwargs)
+        return cls(
+            c_fc=m.c_fc,
+            c_proj=m.c_proj,
+            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'secant_gelu_tanh')],
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         h = self.c_fc(x)
-        h_act = secant_gelu_tanh(h)
+        h_act = self.act_fn(h)
         out = self.c_proj(h_act)
         return out
     
 
-def eager_attention_forward(module, query, key, value, attention_mask, act_fn, scaling=None, dropout=0.0, **kwargs):
+def eager_attention_forward(module, query, key, value, attention_mask, scaling=None, dropout=0.0, **kwargs):
     if scaling is None:
         scaling = query.size(-1) ** -0.5
 
-    attn_weights = bilinear_matmul(query, key.transpose(-1, -2)) * scaling
+    attn_weights = module.matmul_fn(query, key.transpose(-1, -2)) * scaling
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
-    attn_weights = act_fn(attn_weights, dim=-1, dtype=torch.float32)
+    attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32)
 
     # Downcast (if necessary) back to V's dtype (if in mixed-precision) -- No-Op otherwise
     attn_weights = attn_weights.type(value.dtype)
@@ -47,7 +53,7 @@ def eager_attention_forward(module, query, key, value, attention_mask, act_fn, s
     if not attn_weights.grad_fn: # attention is dealt as constant if not part of the gradient graph
         attn_output = torch.matmul(attn_weights, value)
     else:
-        attn_output = bilinear_matmul(attn_weights, value)
+        attn_output = module.matmul_fn(attn_weights, value)
     attn_output = attn_output.transpose(1, 2)
 
     return attn_output, attn_weights
@@ -88,17 +94,19 @@ class FrozenGPT2Attention(nn.Module):
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
         self.is_causal = not is_cross_attention
         self.attn_act_fn = kwargs.get('attn_act_fn', dtd_softmax)
+        self.matmul_fn = kwargs.get('matmul_fn', bilinear_matmul)
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2MLP:
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2Attention:
         return cls(
-            config = m.config,
-            is_cross_attention = m.is_cross_attention,
-            layer_idx = m.layer_idx,
-            c_attn = m.c_attn,
-            q_attn = m.q_attn if hasattr(m, 'q_attn') else None,
-            c_proj = m.c_proj,
-            **kwargs
+            config=m.config,
+            is_cross_attention=m.is_cross_attention,
+            layer_idx=m.layer_idx,
+            c_attn=m.c_attn,
+            q_attn=m.q_attn if hasattr(m, 'q_attn') else None,
+            c_proj=m.c_proj,
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'dtd_softmax')],
+            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'bilinear_matmul')],
         )
 
     def forward(
@@ -164,7 +172,6 @@ class FrozenGPT2Attention(nn.Module):
             key_states,
             value_states,
             attention_mask,
-            act_fn=self.attn_act_fn,
             dropout=self.attn_dropout.p if self.training else 0.0,
             scaling=self.scaling,
             **kwargs,

@@ -61,3 +61,17 @@ def bilinear_mul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 def bilinear_matmul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return BilinearMatmul.apply(x, y)
+
+
+# ---------------------------------------------------------------------------
+# Mapping
+# ---------------------------------------------------------------------------
+
+BILINEAR_FN = {
+    # Standard operations
+    'mul':    torch.mul,
+    'matmul': torch.matmul,
+    # Rule 4 — bilinear (LVP uniform splitting)
+    'bilinear_mul':    bilinear_mul,
+    'bilinear_matmul': bilinear_matmul,
+}
