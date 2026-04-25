@@ -166,7 +166,10 @@ class FrozenGPT2Attention(nn.Module):
             if is_cross_attention:
                 past_key_values.is_updated[self.layer_idx] = True
 
-        attn_output, attn_weights = eager_attention_forward(
+        # keep attention interface to unify nnsight self_attn.source tracing
+        attention_interface = eager_attention_forward
+
+        attn_output, attn_weights = attention_interface(
             self,
             query_states,
             key_states,
