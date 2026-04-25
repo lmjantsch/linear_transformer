@@ -12,12 +12,12 @@ from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import repeat_kv, apply_rotary_pos_emb
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax, secant_tanh
+from linear_transformer.modules.activations import dtd_softmax, secant_tanh
 from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 
 class FrozenGemma2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = True) -> None:
+    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool) -> None:
         super().__init__()
         self.weight = weight
         self.eps = eps
@@ -25,7 +25,7 @@ class FrozenGemma2RMSNorm(nn.Module):
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2RMSNorm:
-        return cls(weight=m.weight, eps=m.eps, frozen_norm=kwargs.get('frozen_norm', True))
+        return cls(weight=m.weight, eps=m.eps, frozen_norm=kwargs.get('frozen_norm', False))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         x_f = x.float()
@@ -39,7 +39,7 @@ class FrozenGemma2RMSNorm(nn.Module):
 
 class FrozenGemma2GeGLU(nn.Module):
 
-    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn=secant_gelu_tanh, mul_fn=bilinear_mul) -> None:
+    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()
         self.gate_proj = gate_proj   # (d_ffn, d_model)
         self.up_proj = up_proj       # (d_ffn, d_model)
@@ -53,8 +53,8 @@ class FrozenGemma2GeGLU(nn.Module):
             gate_proj=m.gate_proj,
             up_proj=m.up_proj,
             down_proj=m.down_proj,
-            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'secant_gelu_tanh')],
-            mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'bilinear_mul')],
+            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'gelu_tanh')],
+            mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'mul')],
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
@@ -104,7 +104,8 @@ def eager_attention_forward(
 class FrozenGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear, **kwargs):
+    def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
+                 attn_act_fn: callable, matmul_fn: callable, attn_softcap_fn: callable, **kwargs):
         super().__init__()
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
         self.config = config
@@ -122,9 +123,9 @@ class FrozenGemma2Attention(nn.Module):
         self.attn_logit_softcapping = self.config.attn_logit_softcapping
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
-        self.attn_act_fn = kwargs.get('attn_act_fn', dtd_softmax)
-        self.matmul_fn = kwargs.get('matmul_fn', bilinear_matmul)
-        self.attn_softcap_fn = kwargs.get('attn_softcap_fn', secant_tanh)
+        self.attn_act_fn = attn_act_fn
+        self.matmul_fn = matmul_fn
+        self.attn_softcap_fn = attn_softcap_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2Attention:
@@ -135,9 +136,9 @@ class FrozenGemma2Attention(nn.Module):
             k_proj=m.k_proj,
             v_proj=m.v_proj,
             o_proj=m.o_proj,
-            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'dtd_softmax')],
-            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'bilinear_matmul')],
-            attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'secant_tanh')],
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
+            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
+            attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'tanh')],
         )
 
     def forward(

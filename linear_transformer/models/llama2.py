@@ -18,7 +18,7 @@ from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 
 class FrozenLlama2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = True) -> None:
+    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = False) -> None:
         super().__init__()
         self.weight = weight
         self.eps = eps
@@ -26,7 +26,7 @@ class FrozenLlama2RMSNorm(nn.Module):
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2RMSNorm:
-        return cls(weight=m.weight, eps=m.variance_epsilon, frozen_norm=kwargs.get('frozen_norm', True))
+        return cls(weight=m.weight, eps=m.variance_epsilon, frozen_norm=kwargs.get('frozen_norm', False))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         x_f = x.float()
@@ -39,7 +39,7 @@ class FrozenLlama2RMSNorm(nn.Module):
 
 class FrozenLlama2SwiGLU(nn.Module):
 
-    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn=secant_silu, mul_fn=bilinear_mul) -> None:
+    def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()
         self.gate_proj = gate_proj   # (d_ffn, d_model)
         self.up_proj = up_proj       # (d_ffn, d_model)
@@ -53,8 +53,8 @@ class FrozenLlama2SwiGLU(nn.Module):
             gate_proj=m.gate_proj,
             up_proj=m.up_proj,
             down_proj=m.down_proj,
-            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'secant_silu')],
-            mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'bilinear_mul')],
+            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'silu')],
+            mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'mul')],
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
@@ -95,7 +95,8 @@ def eager_attention_forward(
 class FrozenLlama2Attention(nn.Module):
     """Llama2 attention, largely unchanged"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear, **kwargs):
+    def __init__(self, config: LlamaConfig, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
+                attn_act_fn: callable, matmul_fn: callable, **kwargs):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -109,8 +110,8 @@ class FrozenLlama2Attention(nn.Module):
         self.k_proj = k_proj
         self.v_proj = v_proj
         self.o_proj = o_proj
-        self.attn_act_fn = kwargs.get('attn_act_fn', dtd_softmax)
-        self.matmul_fn = kwargs.get('matmul_fn', bilinear_matmul)
+        self.attn_act_fn = attn_act_fn
+        self.matmul_fn = matmul_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2Attention:
@@ -121,8 +122,8 @@ class FrozenLlama2Attention(nn.Module):
             k_proj=m.k_proj,
             v_proj=m.v_proj,
             o_proj=m.o_proj,
-            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'dtd_softmax')],
-            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'bilinear_matmul')],
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'sofmax')],
+            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
         )
 
     def forward(

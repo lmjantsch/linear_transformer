@@ -13,7 +13,7 @@ from linear_transformer.modules.bilinear import bilinear_matmul
 
 class FrozenGPT2MLP(nn.Module):
 
-    def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, act_fn=secant_gelu_tanh) -> None:
+    def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, act_fn: callable) -> None:
         super().__init__()
         self.c_fc = c_fc    # (d_model, d_ffn)
         self.c_proj = c_proj  # (d_ffn, d_model)
@@ -25,7 +25,7 @@ class FrozenGPT2MLP(nn.Module):
         return cls(
             c_fc=m.c_fc,
             c_proj=m.c_proj,
-            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'secant_gelu_tanh')],
+            act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'gelu_tanh')],
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
@@ -60,7 +60,7 @@ def eager_attention_forward(module, query, key, value, attention_mask, scaling=N
 
 
 class FrozenGPT2Attention(nn.Module):
-    def __init__(self, config, c_attn, q_attn, c_proj, is_cross_attention=False, layer_idx=None, **kwargs):
+    def __init__(self, config, c_attn, q_attn, c_proj, attn_act_fn, matmul_fn,  is_cross_attention=False, layer_idx=None, **kwargs):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -93,8 +93,8 @@ class FrozenGPT2Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
         self.is_causal = not is_cross_attention
-        self.attn_act_fn = kwargs.get('attn_act_fn', dtd_softmax)
-        self.matmul_fn = kwargs.get('matmul_fn', bilinear_matmul)
+        self.attn_act_fn = attn_act_fn
+        self.matmul_fn = matmul_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2Attention:
@@ -105,8 +105,8 @@ class FrozenGPT2Attention(nn.Module):
             c_attn=m.c_attn,
             q_attn=m.q_attn if hasattr(m, 'q_attn') else None,
             c_proj=m.c_proj,
-            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'dtd_softmax')],
-            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'bilinear_matmul')],
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
+            matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
         )
 
     def forward(

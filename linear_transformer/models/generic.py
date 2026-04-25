@@ -5,7 +5,7 @@ from torch import nn
 
 class FrozenLayerNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, bias: nn.Parameter | None, eps: float, normalized_shape: tuple[int, ...], frozen_norm: bool = True) -> None:
+    def __init__(self, weight: nn.Parameter, bias: nn.Parameter | None, eps: float, normalized_shape: tuple[int, ...], frozen_norm: bool = False) -> None:
         super().__init__()
         self.weight = weight
         self.bias = bias
@@ -20,7 +20,7 @@ class FrozenLayerNorm(nn.Module):
             bias=m.bias,
             eps=m.eps,
             normalized_shape=tuple(m.normalized_shape),
-            frozen_norm=kwargs.get('frozen_norm', True),
+            frozen_norm=kwargs.get('frozen_norm', False),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
