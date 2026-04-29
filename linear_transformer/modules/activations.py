@@ -352,6 +352,43 @@ class SecantJacobianSoftmax(torch.autograd.Function):
         
         return result.to(ctx._orig_dtype), None, None
 
+
+class FrozenDenomSoftmax(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., N)
+        dim: int = -1,
+        dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x_f = x.float()
+        x_max = x_f.max(dim=dim, keepdim=True).values
+        exps = torch.exp(x_f - x_max)
+        sum_exps = torch.sum(exps, dim=dim, keepdim=True)
+    
+        s = exps / sum_exps
+        
+        ctx.save_for_backward(sum_exps)
+        ctx._orig_dtype = orig_dtype
+        ctx._dtype = dtype
+        
+        return s.to(orig_dtype)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # (..., N)
+    ) -> tuple[torch.Tensor, None, None]:
+        (sum_exps,) = ctx.saved_tensors
+        dtype = ctx._dtype
+        
+        grad_t_f = grad_t.to(dtype)
+
+        result = torch.log(grad_t_f.clip(min=1e-7) * sum_exps)
+
+        return result.to(ctx._orig_dtype), None, None
+
 # ---------------------------------------------------------------------------
 # Functional wrappers
 # ---------------------------------------------------------------------------
@@ -395,6 +432,8 @@ def integrated_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torc
 def sec_jac_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return SecantJacobianSoftmax.apply(x, dim, dtype)
 
+def frozen_denom_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    return FrozenDenomSoftmax.apply(x, dim, dtype)
 
 def constant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return F.softmax(x, dim=dim, dtype=dtype).detach()
@@ -424,5 +463,6 @@ ACT_FN = {
     'integrated_softmax': integrated_softmax,
     'secant_softmax':     secant_softmax,
     'pos_ratio_softmax':  pos_ratio_softmax,
+    'frozen_denom_softmax': frozen_denom_softmax,
     'constant_softmax':   constant_softmax,
 }

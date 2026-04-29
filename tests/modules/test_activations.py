@@ -11,11 +11,17 @@ import torch.nn.functional as F
 
 from linear_transformer.modules.activations import (
     DTDSoftmax,
+    IntegratedSoftmax,
+    PosRationSoftmax,
     SecantGELU,
     SecantGELUTanh,
+    SecantJacobianSoftmax,
     SecantReLU,
     SecantSiLU,
+    SecantSoftmax,
     SecantTanh,
+    FrozenDenomSoftmax,
+    constant_softmax,
 )
 from .utils import get_conservation_error, register_error
 
@@ -47,7 +53,7 @@ def test_secant_relu_conservation(device: torch.device) -> None:
     assert err < 1e-5, f"SecantReLU conservation error {err:.2e}"
 
 # ---------------------------------------------------------------------------
-# Softmax
+# Softmax — conservation (pre-existing; seed-state-sensitive)
 # ---------------------------------------------------------------------------
 
 def test_softmax_conservation(device: torch.device) -> None:
@@ -70,3 +76,86 @@ def test_dtd_softmax_conservation(device: torch.device) -> None:
     register_error("DTDSoftmax", err)
     assert err < 1.0, f"DTDSoftmax conservation error unexpectedly large: {err:.4f}"
 
+# ---------------------------------------------------------------------------
+# Softmax — all variants share the same forward (new tests; each sets its own seed)
+# ---------------------------------------------------------------------------
+
+_SOFTMAX_VARIANTS = [
+    DTDSoftmax,
+    SecantSoftmax,
+    PosRationSoftmax,
+    IntegratedSoftmax,
+    SecantJacobianSoftmax,
+    FrozenDenomSoftmax,
+]
+
+
+@pytest.mark.parametrize("cls", _SOFTMAX_VARIANTS)
+def test_softmax_variant_forward(
+    cls: type, shape: tuple[int, int, int], device: torch.device
+) -> None:
+    """Every LVP softmax variant produces the same output as F.softmax."""
+    torch.manual_seed(0)
+    x = torch.randn(shape, device=device)
+    expected = F.softmax(x, dim=-1, dtype=torch.float32)
+    out = cls.apply(x, -1, torch.float32)
+    assert torch.allclose(out.float(), expected.float(), atol=1e-5), (
+        f"{cls.__name__} forward does not match F.softmax"
+    )
+
+
+@pytest.mark.parametrize("cls", _SOFTMAX_VARIANTS)
+def test_softmax_variant_backward_shape(
+    cls: type, shape: tuple[int, int, int], device: torch.device
+) -> None:
+    """Backward produces a gradient with the same shape as the input."""
+    torch.manual_seed(0)
+    x = torch.randn(shape, requires_grad=True, device=device)
+    t = torch.randn(shape, device=device)
+    out = cls.apply(x, -1, torch.float32)
+    out.backward(t)
+    assert x.grad is not None
+    assert x.grad.shape == x.shape
+
+
+@pytest.mark.parametrize("cls", [IntegratedSoftmax, SecantJacobianSoftmax, FrozenDenomSoftmax])
+def test_softmax_approximate_conservation(
+    cls: type, shape: tuple[int, int, int], device: torch.device
+) -> None:
+    """Principled approximate variants; report worst-case error and check it stays below 1.0."""
+    torch.manual_seed(0)
+    x = torch.randn(shape, requires_grad=True, device=device)
+    t = torch.randn(shape, device=device)
+    out = cls.apply(x, -1, torch.float32)
+    out.backward(t)
+    err = get_conservation_error(out, [x], t)
+    register_error(cls.__name__, err)
+    assert err < 1.0, f"{cls.__name__} conservation error unexpectedly large: {err:.4f}"
+
+
+@pytest.mark.parametrize("cls", [SecantSoftmax, PosRationSoftmax])
+def test_softmax_nonconservative_report(
+    cls: type, shape: tuple[int, int, int], device: torch.device
+) -> None:
+    """SecantSoftmax / PosRationSoftmax do not conserve; log the error for comparison."""
+    torch.manual_seed(0)
+    x = torch.randn(shape, requires_grad=True, device=device)
+    t = torch.randn(shape, device=device)
+    out = cls.apply(x, -1, torch.float32)
+    out.backward(t)
+    err = get_conservation_error(out, [x], t)
+    register_error(cls.__name__, err)
+    # No conservation bound — these variants trade conservation for other properties.
+
+
+def test_constant_softmax_is_detached(
+    shape: tuple[int, int, int], device: torch.device
+) -> None:
+    """constant_softmax returns a detached tensor; no gradient flows through it."""
+    torch.manual_seed(0)
+    x = torch.randn(shape, device=device)
+    out = constant_softmax(x)
+    assert out.grad_fn is None
+    assert not out.requires_grad
+    expected = F.softmax(x.detach(), dim=-1)
+    assert torch.allclose(out, expected, atol=1e-6)

@@ -20,7 +20,8 @@ def get_conservation_error(
 
 
 def register_error(module_name: str, error: float) -> None:
-    """Register a conservation error for the summary table."""
+    """Register a conservation error; keeps the worst-case value across multiple shapes."""
     if not hasattr(pytest, "_module_error_results"):
         pytest._module_error_results = {}
-    pytest._module_error_results[module_name] = error
+    prev = pytest._module_error_results.get(module_name, 0.0)
+    pytest._module_error_results[module_name] = max(prev, error)
