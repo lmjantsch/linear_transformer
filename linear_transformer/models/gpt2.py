@@ -22,6 +22,8 @@ class FrozenGPT2MLP(nn.Module):
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2MLP:
         # GPT-2 MLP uses c_fc and c_proj (Conv1D, weight transposed vs nn.Linear)
+        if kwargs.get('center_writing_weights', False):
+            m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
         return cls(
             c_fc=m.c_fc,
             c_proj=m.c_proj,
@@ -98,6 +100,8 @@ class FrozenGPT2Attention(nn.Module):
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2Attention:
+        if kwargs.get('center_writing_weights', False):
+            m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
         return cls(
             config=m.config,
             is_cross_attention=m.is_cross_attention,
