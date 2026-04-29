@@ -21,7 +21,7 @@ class FrozenLlama2RMSNorm(nn.Module):
     def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = False) -> None:
         super().__init__()
         self.weight = weight
-        self.eps = eps
+        self.variance_epsilon = eps
         self.frozen_norm = frozen_norm
 
     @classmethod
@@ -30,7 +30,7 @@ class FrozenLlama2RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         x_f = x.float()
-        rms = x_f.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()  # (B, N, 1)
+        rms = x_f.pow(2).mean(-1, keepdim=True).add(self.variance_epsilon).sqrt()  # (B, N, 1)
         if self.frozen_norm:
             out = self.weight.detach() * (x_f / rms.detach()).to(x.dtype)  # detach to freeze
         else:
@@ -122,7 +122,7 @@ class FrozenLlama2Attention(nn.Module):
             k_proj=m.k_proj,
             v_proj=m.v_proj,
             o_proj=m.o_proj,
-            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'sofmax')],
+            attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
         )
 
