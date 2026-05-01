@@ -36,7 +36,9 @@ def patch_model_for_lvp(
                 if not dry_run:
                     wrapper = registry[child_type](child, **kwargs)
                     setattr(parent, name, wrapper)
-                # Do not recurse into replaced modules — the wrapper owns them
+                    _walk(wrapper, full_name)  # patch nn.Linear etc. inside the wrapper
+                else:
+                    _walk(child, full_name)
             else:
                 _walk(child, full_name)
 

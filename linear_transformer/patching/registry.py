@@ -4,10 +4,10 @@ from typing import Callable
 
 import torch.nn as nn
 
-from linear_transformer.models.generic import FrozenLayerNorm
+from linear_transformer.models.generic import CustomLayerNorm, CustomLinear
 from linear_transformer.models.llama2 import FrozenLlama2RMSNorm, FrozenLlama2SwiGLU, FrozenLlama2Attention
-from linear_transformer.models.gemma2 import FrozenGemma2RMSNorm, FrozenGemma2GeGLU, FrozenGemma2Attention
-from linear_transformer.models.gpt2 import FrozenGPT2MLP, FrozenGPT2Attention
+from linear_transformer.models.gemma2 import LinearGemma2RMSNorm, LinearGemma2GeGLU, LinearGemma2Attention
+from linear_transformer.models.gpt2 import CustomGPT2MLP, CustomGPT2Attention
 
 # Populated below after all wrapper imports
 _REGISTRY: dict[type, Callable[[nn.Module], nn.Module]] = {}
@@ -38,7 +38,9 @@ def _populate_registry() -> None:
     package import time.
     """
 
-    _REGISTRY[nn.LayerNorm] = FrozenLayerNorm.from_module
+    _REGISTRY[nn.Linear] = CustomLinear.from_module
+    _REGISTRY[nn.Conv1d] = CustomLinear.from_module
+    _REGISTRY[nn.LayerNorm] = CustomLayerNorm.from_module
 
     try:
         from transformers.models.llama.modeling_llama import (
@@ -70,9 +72,9 @@ def _populate_registry() -> None:
             Gemma2Attention,
             Gemma2MLP,
         )
-        _REGISTRY[Gemma2RMSNorm] = FrozenGemma2RMSNorm.from_module
-        _REGISTRY[Gemma2Attention] = FrozenGemma2Attention.from_module
-        _REGISTRY[Gemma2MLP] = FrozenGemma2GeGLU.from_module
+        _REGISTRY[Gemma2RMSNorm] = LinearGemma2RMSNorm.from_module
+        _REGISTRY[Gemma2Attention] = LinearGemma2Attention.from_module
+        _REGISTRY[Gemma2MLP] = LinearGemma2GeGLU.from_module
     except ImportError:
         pass
 
@@ -81,8 +83,8 @@ def _populate_registry() -> None:
             GPT2Attention,
             GPT2MLP,
         )
-        _REGISTRY[GPT2Attention] = FrozenGPT2Attention.from_module
-        _REGISTRY[GPT2MLP] = FrozenGPT2MLP.from_module
+        _REGISTRY[GPT2Attention] = CustomGPT2Attention.from_module
+        _REGISTRY[GPT2MLP] = CustomGPT2MLP.from_module
     except ImportError:
         pass
 
