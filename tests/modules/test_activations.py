@@ -21,6 +21,7 @@ from linear_transformer.modules.activations import (
     SecantSoftmax,
     SecantTanh,
     FrozenDenomSoftmax,
+    OuterProdSoftmax,
     constant_softmax,
 )
 from .utils import get_conservation_error, register_error
@@ -87,6 +88,7 @@ _SOFTMAX_VARIANTS = [
     IntegratedSoftmax,
     SecantJacobianSoftmax,
     FrozenDenomSoftmax,
+    OuterProdSoftmax,
 ]
 
 
@@ -118,7 +120,7 @@ def test_softmax_variant_backward_shape(
     assert x.grad.shape == x.shape
 
 
-@pytest.mark.parametrize("cls", [IntegratedSoftmax, SecantJacobianSoftmax, FrozenDenomSoftmax])
+@pytest.mark.parametrize("cls", [IntegratedSoftmax, SecantJacobianSoftmax, FrozenDenomSoftmax, OuterProdSoftmax])
 def test_softmax_approximate_conservation(
     cls: type, shape: tuple[int, int, int], device: torch.device
 ) -> None:
