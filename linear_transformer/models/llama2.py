@@ -18,24 +18,33 @@ from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 
 class FrozenLlama2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool = False) -> None:
+    def __init__(self, weight: nn.Parameter, variance_epsilon: float, is_linear: bool = False) -> None:
         super().__init__()
         self.weight = weight
-        self.variance_epsilon = eps
-        self.frozen_norm = frozen_norm
+        self.variance_epsilon = variance_epsilon
+        self.is_linear = is_linear
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2RMSNorm:
-        return cls(weight=m.weight, eps=m.variance_epsilon, frozen_norm=kwargs.get('frozen_norm', False))
+        return cls(
+            weight=m.weight, 
+            variance_epsilon=m.variance_epsilon, 
+            is_linear=kwargs.get('frozen_norm', False)
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        x_f = x.float()
-        rms = x_f.pow(2).mean(-1, keepdim=True).add(self.variance_epsilon).sqrt()  # (B, N, 1)
-        if self.frozen_norm:
-            out = self.weight.detach() * (x_f / rms.detach()).to(x.dtype)  # detach to freeze
-        else:
-            out = self.weight * (x_f / rms).to(x.dtype)
-        return out
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        # linearized
+        if self.is_linear:
+            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon).detach()
+            return self.weight.detach() * hidden_states.to(input_dtype)
+        # original
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
 
 class FrozenLlama2SwiGLU(nn.Module):
 
@@ -57,13 +66,11 @@ class FrozenLlama2SwiGLU(nn.Module):
             mul_fn=BILINEAR_FN[kwargs.get('mul_fn', 'mul')],
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        gate_pre = self.gate_proj(x)
-        gate = self.act_fn(gate_pre)
-        up = self.up_proj(x)
-        hidden = self.mul_fn(gate, up)
-        out = self.down_proj(hidden)
-        return out
+    def forward(self, x):
+        down_proj = self.down_proj(
+            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x)) # self.mul_fn instead of '*'
+        )
+        return down_proj
     
 def eager_attention_forward(
     module: nn.Module,
@@ -77,16 +84,14 @@ def eager_attention_forward(
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
-    attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
+
+    attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling # self.matmul_fn instead of torch.matmul
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
     attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    if not attn_weights.grad_fn: # attention is dealt as constant if not part of the gradient graph
-        attn_output = torch.matmul(attn_weights, value_states)
-    else:
-        attn_output = module.matmul_fn(attn_weights, value_states)
+    attn_output = module.matmul_fn(attn_weights, value_states) # self.matmul_fn instead of torch.matmul
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, attn_weights

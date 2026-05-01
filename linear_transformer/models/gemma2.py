@@ -15,29 +15,41 @@ from linear_transformer.modules import ACT_FN, BILINEAR_FN
 from linear_transformer.modules.activations import dtd_softmax, secant_tanh
 from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 
-class FrozenGemma2RMSNorm(nn.Module):
+class LinearGemma2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float, frozen_norm: bool) -> None:
+    def __init__(self, weight: nn.Parameter, eps: float, is_linear: bool) -> None:
         super().__init__()
         self.weight = weight
         self.eps = eps
-        self.frozen_norm = frozen_norm
+        self.is_linear = is_linear
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2RMSNorm:
-        return cls(weight=m.weight, eps=m.eps, frozen_norm=kwargs.get('frozen_norm', False))
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2RMSNorm:
+        return cls(
+            weight=m.weight, 
+            eps=m.eps, 
+            is_linear=kwargs.get('frozen_norm', False)
+        )
+    
+    def _norm(self, x):
+        # linearised
+        if self.is_linear == True:
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps).detach()
+        # original
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        x_f = x.float()
-        rms = x_f.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()  # (B, N, 1)
-        w = (1.0 + self.weight.float()) / rms
-        if self.frozen_norm:
-            w = w.detach()  # (B, N, d_model) — effective linear weight, detach to freeze
+    def forward(self, x):
+        output = self._norm(x.float())
+        #linearised
+        if self.is_linear == True:
+            output = output * (1.0 + self.weight.float()).detach()
+            return output.type_as(x)
+        # original
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
 
-        out = (x_f * w).to(x.dtype)
-        return out
 
-class FrozenGemma2GeGLU(nn.Module):
+class LinearGemma2GeGLU(nn.Module):
 
     def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()
@@ -48,7 +60,7 @@ class FrozenGemma2GeGLU(nn.Module):
         self.mul_fn = mul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2GeGLU:
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2GeGLU:
         return cls(
             gate_proj=m.gate_proj,
             up_proj=m.up_proj,
@@ -58,12 +70,11 @@ class FrozenGemma2GeGLU(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        gate_pre = self.gate_proj(x)
-        gate = self.act_fn(gate_pre)
-        up = self.up_proj(x)
-        hidden = self.mul_fn(gate, up)
-        out = self.down_proj(hidden)
-        return out
+        # original (replaced * with 'mul_fn)
+        down_proj = self.down_proj(
+            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x))
+        )
+        return down_proj
 
 def eager_attention_forward(
     module: nn.Module,
@@ -84,6 +95,7 @@ def eager_attention_forward(
 
     attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
 
+    # TODO Do I have to take care of this seperately? Bypass gradient
     if softcap is not None:
         attn_weights = attn_weights / softcap
         attn_weights = module.attn_softcap_fn(attn_weights)
@@ -94,14 +106,11 @@ def eager_attention_forward(
     # upcast attention to fp32
     attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    if not attn_weights.grad_fn: # attention is dealt as constant if not part of the gradient graph
-        attn_output = torch.matmul(attn_weights, value_states)
-    else:
-        attn_output = module.matmul_fn(attn_weights, value_states)
+    attn_output = module.matmul_fn(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
-class FrozenGemma2Attention(nn.Module):
+class LinearGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
@@ -128,7 +137,7 @@ class FrozenGemma2Attention(nn.Module):
         self.attn_softcap_fn = attn_softcap_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGemma2Attention:
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2Attention:
         return cls(
             config=m.config,
             layer_idx=m.layer_idx,
@@ -163,7 +172,7 @@ class FrozenGemma2Attention(nn.Module):
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
-        # keep attention interface to unify nnsight self_attn.source tracing
+        # hardcode attention_interface to 'eager', keep line for nnsight .source similarity with original model
         attention_interface = eager_attention_forward
 
         attn_output, attn_weights = attention_interface(

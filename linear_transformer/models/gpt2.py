@@ -11,7 +11,7 @@ from linear_transformer.modules import ACT_FN, BILINEAR_FN
 from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax
 from linear_transformer.modules.bilinear import bilinear_matmul
 
-class FrozenGPT2MLP(nn.Module):
+class CustomGPT2MLP(nn.Module):
 
     def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, act_fn: callable) -> None:
         super().__init__()
@@ -20,21 +20,25 @@ class FrozenGPT2MLP(nn.Module):
         self.act_fn = act_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2MLP:
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> CustomGPT2MLP:
         # GPT-2 MLP uses c_fc and c_proj (Conv1D, weight transposed vs nn.Linear)
-        if kwargs.get('center_writing_weights', False):
-            m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
+
+        #TODO: Do I need this? Should I experiment with it?
+        # if kwargs.get('center_writing_weights', False):
+        #     m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
+
         return cls(
             c_fc=m.c_fc,
             c_proj=m.c_proj,
             act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'gelu_tanh')],
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        h = self.c_fc(x)
-        h_act = self.act_fn(h)
-        out = self.c_proj(h_act)
-        return out
+    def forward(self, hidden_states: tuple[torch.FloatTensor] | None) -> torch.FloatTensor:
+        hidden_states = self.c_fc(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states = self.c_proj(hidden_states)
+        # hidden_states = self.dropout(hidden_states)
+        return hidden_states
     
 
 def eager_attention_forward(module, query, key, value, attention_mask, scaling=None, dropout=0.0, **kwargs):
@@ -52,16 +56,13 @@ def eager_attention_forward(module, query, key, value, attention_mask, scaling=N
     attn_weights = attn_weights.type(value.dtype)
     # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
 
-    if not attn_weights.grad_fn: # attention is dealt as constant if not part of the gradient graph
-        attn_output = torch.matmul(attn_weights, value)
-    else:
-        attn_output = module.matmul_fn(attn_weights, value)
+    attn_output = module.matmul_fn(attn_weights, value)
     attn_output = attn_output.transpose(1, 2)
 
     return attn_output, attn_weights
 
 
-class FrozenGPT2Attention(nn.Module):
+class CustomGPT2Attention(nn.Module):
     def __init__(self, config, c_attn, q_attn, c_proj, attn_act_fn, matmul_fn,  is_cross_attention=False, layer_idx=None, **kwargs):
         super().__init__()
         self.config = config
@@ -99,7 +100,7 @@ class FrozenGPT2Attention(nn.Module):
         self.matmul_fn = matmul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenGPT2Attention:
+    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> CustomGPT2Attention:
         if kwargs.get('center_writing_weights', False):
             m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
         return cls(
