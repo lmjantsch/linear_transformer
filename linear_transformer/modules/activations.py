@@ -389,6 +389,55 @@ class FrozenDenomSoftmax(torch.autograd.Function):
 
         return result.to(ctx._orig_dtype), None, None
 
+class OuterProdSoftmax(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., N)
+        dim: int = -1,
+        dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x_f = x.to(dtype) # Safer to use .to() instead of .float() if dtype arg is passed
+        
+        # Standard stable Softmax
+        x_max = x_f.max(dim=dim, keepdim=True).values
+        exps = torch.exp(x_f - x_max)
+        sum_exps = torch.sum(exps, dim=dim, keepdim=True)
+        s = exps / sum_exps
+        
+        # Save tensors and attributes needed for backward
+        ctx.save_for_backward(x, s.to(orig_dtype))
+        ctx._orig_dtype = orig_dtype
+        ctx._dtype = dtype
+        ctx._dim = dim  # Save the dimension!
+        
+        return s.to(orig_dtype)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # The incoming vector t from the next layer
+    ) -> tuple[torch.Tensor, None, None, None]: 
+        # Note: Return a None for every input argument in forward (x, dim, dtype)
+        
+        (x, s) = ctx.saved_tensors
+        dim = ctx._dim
+        dtype = ctx._dtype
+        
+        x_f = x.to(dtype)
+        s_f = s.to(dtype)
+        grad_t_f = grad_t.to(dtype)
+
+        s_dot_t = torch.sum(s_f * grad_t_f, dim=dim, keepdim=True)
+        
+        norm_sq = torch.sum(x_f * x_f, dim=dim, keepdim=True)
+        norm_sq = torch.clamp(norm_sq, min=1e-12)
+        
+        result = (s_dot_t / norm_sq) * x_f
+
+        return result.to(ctx._orig_dtype), None, None
+
 # ---------------------------------------------------------------------------
 # Functional wrappers
 # ---------------------------------------------------------------------------
@@ -435,6 +484,9 @@ def sec_jac_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.f
 def frozen_denom_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return FrozenDenomSoftmax.apply(x, dim, dtype)
 
+def outer_prod_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    return OuterProdSoftmax.apply(x, dim, dtype)
+
 def constant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return F.softmax(x, dim=dim, dtype=dtype).detach()
 
@@ -464,5 +516,6 @@ ACT_FN = {
     'secant_softmax':     secant_softmax,
     'pos_ratio_softmax':  pos_ratio_softmax,
     'frozen_denom_softmax': frozen_denom_softmax,
+    'outer_prod_softmax': outer_prod_softmax,
     'constant_softmax':   constant_softmax,
 }
