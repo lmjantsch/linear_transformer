@@ -36,10 +36,9 @@ class CustomLayerNorm(nn.Module):
 
         # linearized
         if self.is_linear:
-            mean_cent_x_f = linear_sub(x_f, mean.detach(), self.eps)
-            out = mean_cent_x_f / sigma.detach() * self.weight.float().detach()
+            out = (x_f -  mean.detach()) / sigma.detach() * self.weight.float().detach()
             if self.bias is not None:
-                out = linear_add(out, self.bias.float().detach(), self.eps)
+                out = out + self.bias.detach().float()
             return out.to(x.dtype)
 
         # original
@@ -79,10 +78,7 @@ class CustomLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # linearized
         if self.is_linear:
-            out = F.linear(x, self.weight_4_linear.detach())
-            if self.bias is not None:
-                out = linear_add(out, self.bias.detach(), 1e-8)
-            return out
+            return F.linear(x, self.weight_4_linear.detach(), self.bias.detach())
             
         # original    
         return F.linear(x, self.weight_4_linear, self.bias)
