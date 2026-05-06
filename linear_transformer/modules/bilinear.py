@@ -9,9 +9,11 @@ class BilinearMul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         x: torch.Tensor,  # (..., d)
         y: torch.Tensor,  # (..., d)
+        x_weight: float = 0.5,
+        y_weight: float = 0.5
     ) -> torch.Tensor:  # (..., d)
         orig_dtype = x.dtype
-        ctx.save_for_backward(x, y)
+        ctx.save_for_backward(x, y, x_weight, y_weight)
         ctx._orig_dtype = orig_dtype
         return (x.float() * y.float()).to(orig_dtype)
 
@@ -20,11 +22,11 @@ class BilinearMul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         grad_t: torch.Tensor,  # (..., d)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x, y = ctx.saved_tensors
+        x, y, x_weight, y_weight = ctx.saved_tensors
         t_f = grad_t.float()
-        grad_x = (0.5 * t_f * y.float()).to(ctx._orig_dtype)
-        grad_y = (0.5 * t_f * x.float()).to(ctx._orig_dtype)
-        return grad_x, grad_y
+        grad_x = (x_weight * t_f * y.float()).to(ctx._orig_dtype)
+        grad_y = (y_weight * t_f * x.float()).to(ctx._orig_dtype)
+        return grad_x, grad_y, None, None
     
 class BilinearMatmul(torch.autograd.Function):
 
@@ -33,9 +35,11 @@ class BilinearMatmul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         x: torch.Tensor,  # (..., d)
         y: torch.Tensor,  # (..., d)
+        x_weight: float,
+        y_weight: float
     ) -> torch.Tensor:  # (..., d)
         orig_dtype = x.dtype
-        ctx.save_for_backward(x, y)
+        ctx.save_for_backward(x, y, x_weight, y_weight)
         ctx._orig_dtype = orig_dtype
         return torch.matmul(x.float(), y.float()).to(orig_dtype)
 
@@ -44,23 +48,30 @@ class BilinearMatmul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         grad_t: torch.Tensor,  # (..., d)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x, y = ctx.saved_tensors
+        x, y, x_weight, y_weight = ctx.saved_tensors
         t_f = grad_t.float()
-        grad_x = (0.5 * torch.matmul(t_f, y.float().mT)).to(ctx._orig_dtype)
-        grad_y = (0.5 * torch.matmul(x.float().mT, t_f)).to(ctx._orig_dtype)
-        return grad_x, grad_y
+        grad_x = (x_weight * torch.matmul(t_f, y.float().mT)).to(ctx._orig_dtype)
+        grad_y = (y_weight * torch.matmul(x.float().mT, t_f)).to(ctx._orig_dtype)
+        return grad_x, grad_y, None, None
 
 
 # ---------------------------------------------------------------------------
 # Functional wrappers
 # ---------------------------------------------------------------------------
 
-def bilinear_mul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return BilinearMul.apply(x, y)
+def mul(x: torch.Tensor, y: torch.Tensor, x_weight: float = 0.5, y_weight: float = 0.5) -> torch.Tensor:
+    return torch.mul(x, y)
+
+def matmul(x: torch.Tensor, y: torch.Tensor, x_weight: float = 0.5, y_weight: float = 0.5) -> torch.Tensor:
+    return torch.matmul(x, y)
 
 
-def bilinear_matmul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return BilinearMatmul.apply(x, y)
+def bilinear_mul(x: torch.Tensor, y: torch.Tensor, x_weight: float = 0.5, y_weight: float = 0.5) -> torch.Tensor:
+    return BilinearMul.apply(x, y, x_weight, y_weight)
+
+
+def bilinear_matmul(x: torch.Tensor, y: torch.Tensor, x_weight: float = 0.5, y_weight: float = 0.5) -> torch.Tensor:
+    return BilinearMatmul.apply(x, y, x_weight, y_weight)
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +80,8 @@ def bilinear_matmul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 BILINEAR_FN = {
     # Standard operations
-    'mul':    torch.mul,
-    'matmul': torch.matmul,
+    'mul':    mul,
+    'matmul': matmul,
     # Rule 4 — bilinear (LVP uniform splitting)
     'bilinear_mul':    bilinear_mul,
     'bilinear_matmul': bilinear_matmul,
