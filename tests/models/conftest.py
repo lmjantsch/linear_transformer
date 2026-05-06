@@ -34,68 +34,68 @@ MODEL_CONFIG_MAPPING: dict[str, list[tuple[str, dict]]] = {
         ("lvp_default", {
             "frozen_norm": True, "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh",
         }),
         ("sec_jac_softmax", {
             "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh",
         }),
         ("outer_prod_softmax", {
             "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh",
         }),
     ],
     ("qwen2.5", "Qwen/Qwen2.5-0.5B"): [
         ("lvp_default", {
             "frozen_norm": True, "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
         ("sec_jac_softmax", {
             "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
         ("outer_prod_softmax", {
             "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
     ],
     ("gemma2", "google/gemma-2-2b"): [
         ("lvp_default", {
             "frozen_norm": True, "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
         }),
         ("sec_jac_softmax", {
             "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
         }),
         ("outer_prod_softmax", {
             "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh", "frozen_linear": True,
+            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
         }),
     ],
     ("llama3.1", "meta-llama/Llama-3.1-8B"): [
         ("lvp_default", {
             "frozen_norm": True, "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
         ("sec_jac_softmax", {
             "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
         ("outer_prod_softmax", {
             "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu", "frozen_linear": True,
+            "mlp_act_fn": "secant_silu",
         }),
     ],
 }
