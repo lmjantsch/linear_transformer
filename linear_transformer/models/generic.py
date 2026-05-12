@@ -5,16 +5,18 @@ from torch import nn
 import torch.nn.functional as F
 
 from linear_transformer.modules.linear import linear_sub, linear_add
+from linear_transformer.models.utils import baseline_hidden_hook
 
 class CustomLayerNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, bias: nn.Parameter | None, eps: float, normalized_shape: tuple[int, ...], is_linear: bool = False) -> None:
+    def __init__(self, weight: nn.Parameter, bias: nn.Parameter | None, eps: float, normalized_shape: tuple[int, ...],
+                 norm_approx: str | None = None) -> None:
         super().__init__()
         self.weight = weight
         self.bias = bias
         self.eps = eps
         self.normalized_shape = normalized_shape
-        self.is_linear = is_linear
+        self.norm_approx = norm_approx
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> CustomLayerNorm:
@@ -23,20 +25,38 @@ class CustomLayerNorm(nn.Module):
             bias=m.bias,
             eps=m.eps,
             normalized_shape=tuple(m.normalized_shape),
-            is_linear=kwargs.get('frozen_norm', False),
+            norm_approx=kwargs.get('norm_approx', None),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         x_f = x.float()
-        dims = tuple(range(-len(self.normalized_shape), 0))
+        baseline_hidden = baseline_hidden_hook()
+        dynamic_mask = baseline_hidden_hook()
 
-        mean = x_f.mean(dim=dims, keepdim=True) 
-        var = x_f.var(dim=dims, keepdim=True, unbiased=False) 
+        dims = tuple(range(-len(self.normalized_shape), 0))
+        mean = x_f.mean(dim=dims, keepdim=True)
+        var = x_f.var(dim=dims, keepdim=True, unbiased=False)
         sigma = (var + self.eps).sqrt()
 
-        # linearized
-        if self.is_linear:
-            out = (x_f -  mean.detach()) / sigma.detach() * self.weight.float().detach()
+        if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
+            if self.norm_approx == 'dynamic_thr':
+                baseline_f = baseline_hidden.to(torch.float32)
+                clean_norm = x_f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                scale = baseline_f.norm(dim=-1, keepdim=True) / clean_norm
+                sim = torch.cosine_similarity(x_f, baseline_f, dim=-1).unsqueeze(-1)
+                sin2 = (1 - sim.pow(2)).clamp(min=0)
+                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
+                dynamic_mask = f_diff >= 0.0
+            mean_d = torch.where(dynamic_mask, mean, mean.detach())
+            sigma_d = torch.where(dynamic_mask, sigma, sigma.detach())
+            out = (x_f - mean_d) / sigma_d * self.weight.float().detach()
+            if self.bias is not None:
+                out = out + self.bias.detach().float()
+            return out.to(x.dtype)
+
+        # frozen
+        if self.norm_approx == 'frozen':
+            out = (x_f - mean.detach()) / sigma.detach() * self.weight.float().detach()
             if self.bias is not None:
                 out = out + self.bias.detach().float()
             return out.to(x.dtype)

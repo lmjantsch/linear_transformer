@@ -14,6 +14,32 @@ def _secant_denom(x: torch.Tensor, eps: float) -> torch.Tensor:
     """Stabilised denominator for Rule 2: x + eps * sign(x), clamped so sign never flips."""
     return x + eps * x.sign().clamp(min=1)
 
+# ---------------------------------------------------------------------------
+# Others
+# ---------------------------------------------------------------------------
+
+
+class SoftcapFN(torch.autograd.Function):
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., N)
+        softcap: float
+    ) -> torch.Tensor:
+        x = x / softcap
+        x = torch.tanh(x)
+        x = x * softcap
+        return x
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # (..., N)
+    ) -> tuple[torch.Tensor, None]:
+
+        return grad_t, None
+    
+
 
 # ---------------------------------------------------------------------------
 # Rule 2 variants — zero-preserving nonlinearities

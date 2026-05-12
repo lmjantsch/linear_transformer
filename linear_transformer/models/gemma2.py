@@ -12,40 +12,53 @@ from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import repeat_kv, apply_rotary_pos_emb
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import dtd_softmax, secant_tanh
+from linear_transformer.modules.activations import dtd_softmax, secant_tanh, SoftcapFN
 from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
+from linear_transformer.models.utils import baseline_hidden_hook
 
 class LinearGemma2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, eps: float, is_linear: bool) -> None:
+    def __init__(self, weight: nn.Parameter, eps: float, norm_approx: str | None = None) -> None:
         super().__init__()
         self.weight = weight
         self.eps = eps
-        self.is_linear = is_linear
+        self.norm_approx = norm_approx
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2RMSNorm:
         return cls(
-            weight=m.weight, 
-            eps=m.eps, 
-            is_linear=kwargs.get('frozen_norm', False)
+            weight=m.weight,
+            eps=m.eps,
+            norm_approx=kwargs.get('norm_approx', None),
         )
-    
-    def _norm(self, x):
-        # linearised
-        if self.is_linear == True:
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps).detach()
-        # original
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float())
-        #linearised
-        if self.is_linear == True:
-            output = output * (1.0 + self.weight.float()).detach()
+        x_f = x.float()
+        baseline_hidden = baseline_hidden_hook()
+        dynamic_mask = baseline_hidden_hook()
+
+        variance = x_f.pow(2).mean(-1, keepdim=True)
+
+        if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
+            if self.norm_approx == 'dynamic_thr':
+                baseline_hidden = baseline_hidden.to(torch.float32)
+                clean_norm = x_f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
+                sim = torch.cosine_similarity(x_f, baseline_hidden, dim=-1).unsqueeze(-1)
+                sin2 = (1 - sim.pow(2)).clamp(min=0)
+                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
+                dynamic_mask = f_diff >= 0.0
+            rms_term = torch.rsqrt(variance + self.eps)
+            rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
+            output = x_f * rms_term * (1.0 + self.weight.float()).detach()
+            return output.type_as(x)
+
+        # frozen
+        if self.norm_approx == 'frozen':
+            output = x_f * torch.rsqrt(variance + self.eps).detach() * (1.0 + self.weight.float()).detach()
             return output.type_as(x)
         # original
-        output = output * (1.0 + self.weight.float())
+        output = x_f * torch.rsqrt(variance + self.eps) * (1.0 + self.weight.float())
         return output.type_as(x)
 
 
@@ -96,10 +109,8 @@ def eager_attention_forward(
     attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
 
     # TODO Do I have to take care of this seperately? Bypass gradient
-    if softcap is not None:
-        attn_weights = attn_weights / softcap
-        attn_weights = module.attn_softcap_fn(attn_weights)
-        attn_weights = attn_weights * softcap
+    # if softcap is not None:
+    #     attn_weights = SoftcapFN.apply(attn_weights, softcap)
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
@@ -109,6 +120,7 @@ def eager_attention_forward(
     attn_output = module.matmul_fn(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
+
 
 class LinearGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""

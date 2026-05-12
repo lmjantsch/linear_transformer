@@ -15,29 +15,50 @@ from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
 from linear_transformer.modules.activations import secant_silu, dtd_softmax
 from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
+from linear_transformer.models.utils import baseline_hidden_hook
+
 
 class FrozenLlama2RMSNorm(nn.Module):
 
-    def __init__(self, weight: nn.Parameter, variance_epsilon: float, is_linear: bool = False) -> None:
+    def __init__(self, weight: nn.Parameter, variance_epsilon: float, norm_approx: str | None = None) -> None:
         super().__init__()
+        self.r = nn.Parameter(torch.ones(123))
         self.weight = weight
         self.variance_epsilon = variance_epsilon
-        self.is_linear = is_linear
+        self.norm_approx = norm_approx
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2RMSNorm:
         return cls(
-            weight=m.weight, 
-            variance_epsilon=m.variance_epsilon, 
-            is_linear=kwargs.get('frozen_norm', False)
+            weight=m.weight,
+            variance_epsilon=m.variance_epsilon,
+            norm_approx=kwargs.get('norm_approx', None),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
+        baseline_hidden = baseline_hidden_hook()
+        dynamic_mask = baseline_hidden_hook()
+
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        # linearized
-        if self.is_linear:
+
+        if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
+            if self.norm_approx == 'dynamic_thr':
+                baseline_hidden = baseline_hidden.to(torch.float32)
+                clean_norm = hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
+                sim = torch.cosine_similarity(hidden_states, baseline_hidden, dim=-1).unsqueeze(-1)
+                sin2 = (1 - sim.pow(2)).clamp(min=0)
+                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
+                dynamic_mask = f_diff >= 0.0
+            rms_term = torch.rsqrt(variance + self.variance_epsilon)
+            rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
+            hidden_states = hidden_states * rms_term
+            return self.weight.detach() * hidden_states.to(input_dtype)
+
+        # frozen
+        if self.norm_approx == 'frozen':
             hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon).detach()
             return self.weight.detach() * hidden_states.to(input_dtype)
         # original
