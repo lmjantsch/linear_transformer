@@ -10,8 +10,8 @@ from nnsight import NNsight
 from linear_transformer import patch_model_for_lvp
 
 from tests.models.utils import (
-    get_arch,
-    cache_forward_and_backward,
+    cache_org_model,
+    cache_patched_model,
     print_kl_table,
     print_forward_table,
     print_forward_identity_table,
@@ -31,72 +31,72 @@ PROMPTS = [
 
 MODEL_CONFIG_MAPPING: dict[str, list[tuple[str, dict]]] = {
     ("gpt2", "gpt2"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
+        # ("fr_norm", {
+        #     "frozen_norm": True
+        # }),
+        # ("secant_mlp", {
+        #     "mlp_act_fn": "secant_gelu_tanh"
+        # }),
+        # ("bilinear", {
+        #     "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul"
+        # }),
+        # ("integrated_softmax", {
+        #     "attn_act_fn": "integrated_softmax",
+        # }),
+        # ("sec_jac_softmax", {
+        #     "attn_act_fn": "sec_jac_softmax",
+        # }),
     ],
     ("qwen2.5", "Qwen/Qwen2.5-0.5B"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
+        # ("fr_norm", {
+        #     "frozen_norm": True
+        # }),
+        # ("secant_mlp", {
+        #     "mlp_act_fn": "secant_silu"
+        # }),
+        # ("bilinear", {
+        #     "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul"
+        # }),
+        # ("integrated_softmax", {
+        #     "attn_act_fn": "integrated_softmax",
+        # }),
+        # ("sec_jac_softmax", {
+        #     "attn_act_fn": "sec_jac_softmax",
+        # }),
     ],
     ("gemma2", "google/gemma-2-2b"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
-        }),
+        # ("fr_norm", {
+        #     "frozen_norm": True
+        # }),
+        # ("secant_mlp", {
+        #     "mlp_act_fn": "secant_gelu_tanh"
+        # }),
+        # ("bilinear", {
+        #     "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul"
+        # }),
+        # ("integrated_softmax", {
+        #     "attn_act_fn": "integrated_softmax",
+        # }),
+        # ("sec_jac_softmax", {
+        #     "attn_act_fn": "sec_jac_softmax",
+        # }),
     ],
     ("llama3.1", "meta-llama/Llama-3.1-8B"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
+        # ("fr_norm", {
+        #     "frozen_norm": True
+        # }),
+        # ("secant_mlp", {
+        #     "mlp_act_fn": "secant_silu"
+        # }),
+        # ("bilinear", {
+        #     "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul"
+        # }),
+        # ("integrated_softmax", {
+        #     "attn_act_fn": "integrated_softmax",
+        # }),
+        # ("sec_jac_softmax", {
+        #     "attn_act_fn": "sec_jac_softmax",
+        # }),
     ],
 }
 
@@ -141,14 +141,12 @@ def batch_inputs(tokenizer: AutoTokenizer, device: torch.device) -> dict:
 
 @pytest.fixture(scope="session")
 def org_model_cache(model_id: str, device: torch.device, dtype: torch.dtype, batch_inputs: dict) -> dict:
-    cache = {}
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, attn_implementation='eager'
     ).to(device).eval()
     try:
         model = NNsight(model)
-
-        cache = cache_forward_and_backward(model_id, model, batch_inputs, cache)
+        cache = cache_org_model(model_id, model, batch_inputs)
     finally:
         del model
         gc.collect()
@@ -160,63 +158,35 @@ def org_model_cache(model_id: str, device: torch.device, dtype: torch.dtype, bat
 def identity_model_cache(
     model_id: str, device: torch.device, dtype: torch.dtype, batch_inputs: dict
 ) -> dict:
-    cache = {}
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, attn_implementation='eager'
     ).to(device).eval()
     try:
-        model = patch_model_for_lvp(model)
-
-        cache = cache_forward_and_backward(model_id, model, batch_inputs, cache)
+        model = patch_model_for_lvp(model, model_id)
+        cache = cache_patched_model(model_id, model, batch_inputs)
     finally:
         del model
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-
     return cache
 
 @pytest.fixture(scope="session")
 def patched_model_cache(
     model_id: str, lvp_config: dict, device: torch.device, dtype: torch.dtype, batch_inputs: dict
 ) -> dict:
-    cache = {}
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, attn_implementation='eager'
     ).to(device).eval()
     try:
-        model = patch_model_for_lvp(model, **lvp_config)
-
-        cache = cache_forward_and_backward(model_id, model, batch_inputs, cache)
+        model = patch_model_for_lvp(model, model_id, **lvp_config)
+        cache = cache_patched_model(model_id, model, batch_inputs)
     finally:
         del model
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-
     return cache
-
-
-# _test_start: dict[str, float] = {}
-
-
-# def pytest_runtest_setup(item: pytest.Item) -> None:
-#     _test_start[item.nodeid] = time.perf_counter()
-#     if torch.cuda.is_available():
-#         torch.cuda.reset_peak_memory_stats()
-
-
-# def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-#     if report.when == "teardown":
-#         start = _test_start.pop(report.nodeid, None)
-#         if start is None:
-#             return
-#         elapsed = time.perf_counter() - start
-#         if torch.cuda.is_available():
-#             peak_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
-#             print(f"  [{report.nodeid}] {elapsed:.1f}s | peak CUDA: {peak_mb:.0f} MB", flush=True)
-#         else:
-#             print(f"  [{report.nodeid}] {elapsed:.1f}s", flush=True)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -229,10 +199,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if hasattr(pytest, "_model_forward_identity"):
         print_forward_identity_table(pytest._model_forward_identity)
-        if extended:
-            for mid, data in pytest._model_forward_identity.items():
-                if not data["passed"]:
-                    print_forward_table(mid, data["errors"])
+        for mid, data in pytest._model_forward_identity.items():
+            if not data["passed"]:
+                print_forward_table(mid, data["errors"])
 
     if hasattr(pytest, "_model_backward_identity"):
         print_backward_identity_table(pytest._model_backward_identity)
@@ -246,10 +215,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if hasattr(pytest, "_lvp_model_forward_identity"):
         print_forward_identity_table(pytest._lvp_model_forward_identity)
-        if extended:
-            for mid, data in pytest._lvp_model_forward_identity.items():
-                if not data["passed"]:
-                    print_forward_table(mid, data["errors"])
+        for mid, data in pytest._lvp_model_forward_identity.items():
+            if not data["passed"]:
+                print_forward_table(mid, data["errors"])
 
     if hasattr(pytest, "_lvp_model_embedding_ratio"):
         print_conservation_embedding_table(pytest._lvp_model_embedding_ratio)

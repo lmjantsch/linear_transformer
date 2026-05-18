@@ -13,7 +13,9 @@ class BilinearMul(torch.autograd.Function):
         y_weight: float = 0.5
     ) -> torch.Tensor:  # (..., d)
         orig_dtype = x.dtype
-        ctx.save_for_backward(x, y, x_weight, y_weight)
+        ctx.save_for_backward(x, y)
+        ctx._x_weight = x_weight
+        ctx._y_weight = y_weight
         ctx._orig_dtype = orig_dtype
         return (x.float() * y.float()).to(orig_dtype)
 
@@ -22,10 +24,10 @@ class BilinearMul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         grad_t: torch.Tensor,  # (..., d)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x, y, x_weight, y_weight = ctx.saved_tensors
+        x, y = ctx.saved_tensors
         t_f = grad_t.float()
-        grad_x = (x_weight * t_f * y.float()).to(ctx._orig_dtype)
-        grad_y = (y_weight * t_f * x.float()).to(ctx._orig_dtype)
+        grad_x = (ctx._x_weight * t_f * y.float()).to(ctx._orig_dtype)
+        grad_y = (ctx._y_weight * t_f * x.float()).to(ctx._orig_dtype)
         return grad_x, grad_y, None, None
     
 class BilinearMatmul(torch.autograd.Function):
@@ -39,7 +41,9 @@ class BilinearMatmul(torch.autograd.Function):
         y_weight: float
     ) -> torch.Tensor:  # (..., d)
         orig_dtype = x.dtype
-        ctx.save_for_backward(x, y, x_weight, y_weight)
+        ctx.save_for_backward(x, y)
+        ctx._x_weight = x_weight
+        ctx._y_weight = y_weight
         ctx._orig_dtype = orig_dtype
         return torch.matmul(x.float(), y.float()).to(orig_dtype)
 
@@ -48,10 +52,10 @@ class BilinearMatmul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         grad_t: torch.Tensor,  # (..., d)
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x, y, x_weight, y_weight = ctx.saved_tensors
+        x, y = ctx.saved_tensors
         t_f = grad_t.float()
-        grad_x = (x_weight * torch.matmul(t_f, y.float().mT)).to(ctx._orig_dtype)
-        grad_y = (y_weight * torch.matmul(x.float().mT, t_f)).to(ctx._orig_dtype)
+        grad_x = (ctx._x_weight * torch.matmul(t_f, y.float().mT)).to(ctx._orig_dtype)
+        grad_y = (ctx._y_weight * torch.matmul(x.float().mT, t_f)).to(ctx._orig_dtype)
         return grad_x, grad_y, None, None
 
 

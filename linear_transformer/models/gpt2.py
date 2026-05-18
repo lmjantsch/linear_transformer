@@ -3,40 +3,35 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from transformers.pytorch_utils import Conv1D
 from transformers.cache_utils import Cache, EncoderDecoderCache
-from transformers.utils.generic import maybe_autocast
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax
-from linear_transformer.modules.bilinear import bilinear_matmul
 
-class CustomGPT2MLP(nn.Module):
+from linear_transformer.models.utils import CustomModule, conv1d_to_linear, slice_conv1d, hidden_junction_hook, gradient_junction_hook
 
-    def __init__(self, c_fc: nn.Linear, c_proj: nn.Linear, act_fn: callable) -> None:
+class CustomGPT2MLP(CustomModule):
+
+    def __init__(self, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable) -> None:
         super().__init__()
-        self.c_fc = c_fc    # (d_model, d_ffn)
-        self.c_proj = c_proj  # (d_ffn, d_model)
+        self.up_proj = up_proj    # (d_ffn, d_model)
+        self.down_proj = down_proj  # (d_model, d_ffn)
         self.act_fn = act_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> CustomGPT2MLP:
-        # GPT-2 MLP uses c_fc and c_proj (Conv1D, weight transposed vs nn.Linear)
-
-        #TODO: Do I need this? Should I experiment with it?
-        # if kwargs.get('center_writing_weights', False):
-        #     m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGPT2MLP:
 
         return cls(
-            c_fc=m.c_fc,
-            c_proj=m.c_proj,
+            up_proj=conv1d_to_linear(m.c_fc.weight, m.c_fc.bias),
+            down_proj=conv1d_to_linear(m.c_proj.weight, m.c_proj.bias),
             act_fn=ACT_FN[kwargs.get('mlp_act_fn', 'gelu_tanh')],
         )
 
-    def forward(self, hidden_states: tuple[torch.FloatTensor] | None) -> torch.FloatTensor:
-        hidden_states = self.c_fc(hidden_states)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        _, up_states, _ = gradient_junction_hook(hidden_states)
+        hidden_states = self.up_proj(up_states)
         hidden_states = self.act_fn(hidden_states)
-        hidden_states = self.c_proj(hidden_states)
+        hidden_states = self.down_proj(hidden_states)
         # hidden_states = self.dropout(hidden_states)
         return hidden_states
     
@@ -62,14 +57,15 @@ def eager_attention_forward(module, query, key, value, attention_mask, scaling=N
     return attn_output, attn_weights
 
 
-class CustomGPT2Attention(nn.Module):
-    def __init__(self, config, c_attn, q_attn, c_proj, attn_act_fn, matmul_fn,  is_cross_attention=False, layer_idx=None, **kwargs):
+class CustomGPT2Attention(CustomModule):
+    def __init__(self, config, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear,
+                 out_proj, attn_act_fn: callable, matmul_fn: callable,
+                 layer_idx: int | None = None, **kwargs):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        self.split_size = self.embed_dim
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f"`embed_dim` must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
@@ -79,8 +75,8 @@ class CustomGPT2Attention(nn.Module):
         self.scale_attn_weights = config.scale_attn_weights
         self.scale_attn_by_inverse_layer_idx = config.scale_attn_by_inverse_layer_idx
         self.reorder_and_upcast_attn = config.reorder_and_upcast_attn
-        self.is_cross_attention = is_cross_attention
         self.layer_idx = layer_idx
+        self.is_causal = True
 
         # Precompute unified scaling factor (accounts for both head_dim and layer-wise scaling)
         self.scaling = 1.0
@@ -89,27 +85,32 @@ class CustomGPT2Attention(nn.Module):
         if self.scale_attn_by_inverse_layer_idx:
             self.scaling /= float(self.layer_idx + 1)
 
-        self.q_attn = q_attn
-        self.c_attn = c_attn
-        self.c_proj = c_proj
+        self.q_proj = q_proj
+        self.k_proj = k_proj
+        self.v_proj = v_proj
+        self.out_proj = out_proj
 
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
-        self.is_causal = not is_cross_attention
         self.attn_act_fn = attn_act_fn
         self.matmul_fn = matmul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> CustomGPT2Attention:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGPT2Attention:
+        if m.is_cross_attention:
+            raise NotImplementedError("Cross-attention is not supported.")
         if kwargs.get('center_writing_weights', False):
             m.c_proj.weight.data = m.c_proj.weight.data - m.c_proj.weight.data.mean(dim=1, keepdim=True)
+
+        embed_dim = m.embed_dim
+
         return cls(
             config=m.config,
-            is_cross_attention=m.is_cross_attention,
             layer_idx=m.layer_idx,
-            c_attn=m.c_attn,
-            q_attn=m.q_attn if hasattr(m, 'q_attn') else None,
-            c_proj=m.c_proj,
+            q_proj=slice_conv1d(m.c_attn, s=slice(0, embed_dim)),
+            k_proj=slice_conv1d(m.c_attn, s=slice(embed_dim, 2 * embed_dim)),
+            v_proj=slice_conv1d(m.c_attn, s=slice(2 * embed_dim, None)),
+            out_proj=conv1d_to_linear(m.c_proj.weight, m.c_proj.bias),
             attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
         )
@@ -124,52 +125,28 @@ class CustomGPT2Attention(nn.Module):
         output_attentions: bool | None = False,
         **kwargs,
     ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]:
-        is_cross_attention = encoder_hidden_states is not None
+        if encoder_hidden_states is not None:
+            raise NotImplementedError("Cross-attention is not supported.")
+
         if past_key_values is not None:
-            if isinstance(past_key_values, EncoderDecoderCache):
-                is_updated = past_key_values.is_updated.get(self.layer_idx)
-                if is_cross_attention:
-                    # after the first generated id, we can subsequently re-use all key/value_layer from cache
-                    curr_past_key_values = past_key_values.cross_attention_cache
-                else:
-                    curr_past_key_values = past_key_values.self_attention_cache
-            else:
-                curr_past_key_values = past_key_values
+            curr_past_key_values = (
+                past_key_values.self_attention_cache
+                if isinstance(past_key_values, EncoderDecoderCache)
+                else past_key_values
+            )
 
-        if is_cross_attention:
-            if not hasattr(self, "q_attn"):
-                raise ValueError(
-                    "If class is used as cross attention, the weights `q_attn` have to be defined. "
-                    "Please make sure to instantiate class with `GPT2Attention(..., is_cross_attention=True)`."
-                )
-            query_states = self.q_attn(hidden_states)
-            attention_mask = encoder_attention_mask
+        _, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
+        query_states = self.q_proj(q_hidden)
+        key_states = self.k_proj(k_hidden)
+        value_states = self.v_proj(v_hidden)
 
-            # Try to get key/value states from cache if possible
-            if past_key_values is not None and is_updated:
-                key_states = curr_past_key_values.layers[self.layer_idx].keys
-                value_states = curr_past_key_values.layers[self.layer_idx].values
-            else:
-                key_states, value_states = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
-                shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-                key_states = key_states.view(shape_kv).transpose(1, 2)
-                value_states = value_states.view(shape_kv).transpose(1, 2)
-        else:
-            query_states, key_states, value_states = self.c_attn(hidden_states).split(self.split_size, dim=2)
-            shape_kv = (*key_states.shape[:-1], -1, self.head_dim)
-            key_states = key_states.view(shape_kv).transpose(1, 2)
-            value_states = value_states.view(shape_kv).transpose(1, 2)
+        shape = (*q_hidden.shape[:-1], -1, self.head_dim)
+        query_states = query_states.view(shape).transpose(1, 2)
+        key_states = key_states.view(shape).transpose(1, 2)
+        value_states = value_states.view(shape).transpose(1, 2)
 
-        shape_q = (*query_states.shape[:-1], -1, self.head_dim)
-        query_states = query_states.view(shape_q).transpose(1, 2)
-
-        if (past_key_values is not None and not is_cross_attention) or (
-            past_key_values is not None and is_cross_attention and not is_updated
-        ):
+        if past_key_values is not None:
             key_states, value_states = curr_past_key_values.update(key_states, value_states, self.layer_idx)
-            # set flag that curr layer for cross-attn is already updated so we can re-use in subsequent calls
-            if is_cross_attention:
-                past_key_values.is_updated[self.layer_idx] = True
 
         # keep attention interface to unify nnsight self_attn.source tracing
         attention_interface = eager_attention_forward
@@ -185,8 +162,55 @@ class CustomGPT2Attention(nn.Module):
             **kwargs,
         )
 
+        # head-wise attention output
+        head_wise_attn_output = torch.einsum('BSHd, DHd -> HBSD', attn_output.detach(), self.out_proj.weight.reshape(-1, self.num_heads, self.head_dim))
         attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
-        attn_output = self.c_proj(attn_output)
-        # attn_output = self.resid_dropout(attn_output)
+        attn_output = self.out_proj(attn_output)
+        attn_output = torch.cat([attn_output.unsqueeze(0), head_wise_attn_output], dim=0)
 
         return attn_output, attn_weights
+    
+
+class CustomGPT2Block(GradientCheckpointingLayer):
+    def __init__(self, ln_1: nn.Module, attn: nn.Module, ln_2: nn.Module, mlp: nn.Module):
+        super().__init__()
+        self.ln_1 = ln_1
+        self.attn = attn
+        self.ln_2 = ln_2
+        self.mlp = mlp
+
+    @classmethod
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGPT2Block:
+        return cls(ln_1=m.ln_1, attn=m.attn, ln_2=m.ln_2, mlp=m.mlp)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.FloatTensor | None = None,
+        encoder_hidden_states: torch.Tensor | None = None,
+        encoder_attention_mask: torch.FloatTensor | None = None,
+        use_cache: bool | None = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        if encoder_hidden_states is not None:
+            raise NotImplementedError("Cross-attention is not supported.")
+
+        residual = hidden_states
+        hkqv_states = hidden_junction_hook(hidden_states, n=3)  # (4, B, N, d_model)
+        hkqv_states = self.ln_1(hkqv_states)
+        attn_out, _ = self.attn(
+            hidden_states=hkqv_states,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            **kwargs,
+        )
+        hidden_states = residual + attn_out[0]
+
+        residual = hidden_states
+        hgu_states = hidden_junction_hook(hidden_states, n=2)
+        hgu_states = self.ln_2(hgu_states)
+        mlp_out = self.mlp(hgu_states)
+        hidden_states = mlp_out + residual
+
+        return hidden_states

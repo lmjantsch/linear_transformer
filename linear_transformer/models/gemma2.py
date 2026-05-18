@@ -5,18 +5,17 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from transformers.cache_utils import Cache 
+from transformers.cache_utils import Cache
 from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import repeat_kv, apply_rotary_pos_emb
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import dtd_softmax, secant_tanh, SoftcapFN
-from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
-from linear_transformer.models.utils import baseline_hidden_hook
+from linear_transformer.models.utils import CustomModule, hidden_junction_hook, gradient_junction_hook
 
-class LinearGemma2RMSNorm(nn.Module):
+class CustomGemma2RMSNorm(CustomModule):
 
     def __init__(self, weight: nn.Parameter, eps: float, norm_approx: str | None = None) -> None:
         super().__init__()
@@ -25,44 +24,34 @@ class LinearGemma2RMSNorm(nn.Module):
         self.norm_approx = norm_approx
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2RMSNorm:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGemma2RMSNorm:
         return cls(
             weight=m.weight,
             eps=m.eps,
             norm_approx=kwargs.get('norm_approx', None),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, head_wise: bool = False) -> torch.Tensor:
         x_f = x.float()
-        baseline_hidden = baseline_hidden_hook()
-        dynamic_mask = baseline_hidden_hook()
+        weight = 1.0 + self.weight.float()
 
-        variance = x_f.pow(2).mean(-1, keepdim=True)
-
-        if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
-            if self.norm_approx == 'dynamic_thr':
-                baseline_hidden = baseline_hidden.to(torch.float32)
-                clean_norm = x_f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
-                sim = torch.cosine_similarity(x_f, baseline_hidden, dim=-1).unsqueeze(-1)
-                sin2 = (1 - sim.pow(2)).clamp(min=0)
-                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
-                dynamic_mask = f_diff >= 0.0
+        if head_wise:
+            # RMS from sum of heads so all heads share the same scale factor:
+            # sum(h_i * rms_inv) == sum(h_i) * rms_inv  (B, S, H, d_model)
+            variance = x_f.sum(dim=2).pow(2).mean(-1, keepdim=True)   # (B, S, 1)
+            rms_term = torch.rsqrt(variance + self.eps).unsqueeze(2)   # (B, S, 1, 1)
+        else:
+            variance = x_f.pow(2).mean(-1, keepdim=True)
             rms_term = torch.rsqrt(variance + self.eps)
-            rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
-            output = x_f * rms_term * (1.0 + self.weight.float()).detach()
-            return output.type_as(x)
 
-        # frozen
         if self.norm_approx == 'frozen':
-            output = x_f * torch.rsqrt(variance + self.eps).detach() * (1.0 + self.weight.float()).detach()
-            return output.type_as(x)
-        # original
-        output = x_f * torch.rsqrt(variance + self.eps) * (1.0 + self.weight.float())
+            output = x_f * rms_term.detach() * weight.detach()
+        else:
+            output = x_f * rms_term * weight
         return output.type_as(x)
 
 
-class LinearGemma2GeGLU(nn.Module):
+class CustomGemma2MLP(CustomModule):
 
     def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()
@@ -73,7 +62,7 @@ class LinearGemma2GeGLU(nn.Module):
         self.mul_fn = mul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2GeGLU:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGemma2MLP:
         return cls(
             gate_proj=m.gate_proj,
             up_proj=m.up_proj,
@@ -83,11 +72,15 @@ class LinearGemma2GeGLU(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
-        # original (replaced * with 'mul_fn)
-        down_proj = self.down_proj(
-            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x))
-        )
-        return down_proj
+        _, gate_x, up_x = gradient_junction_hook(x)
+
+        gate_out = self.gate_proj(gate_x)
+        gate_act = self.act_fn(gate_out)
+        up_out = self.up_proj(up_x)
+
+        z = self.mul_fn(gate_act, up_out)
+        down_out = self.down_proj(z)
+        return down_out
 
 def eager_attention_forward(
     module: nn.Module,
@@ -108,9 +101,10 @@ def eager_attention_forward(
 
     attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
 
-    # TODO Do I have to take care of this seperately? Bypass gradient
-    # if softcap is not None:
-    #     attn_weights = SoftcapFN.apply(attn_weights, softcap)
+    if softcap is not None:
+        attn_weights = attn_weights / softcap
+        attn_weights = torch.tanh(attn_weights)
+        attn_weights = attn_weights * softcap
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
@@ -122,15 +116,16 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
-class LinearGemma2Attention(nn.Module):
+class CustomGemma2Attention(CustomModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
-                 attn_act_fn: callable, matmul_fn: callable, attn_softcap_fn: callable, **kwargs):
+                 attn_act_fn: callable, matmul_fn: callable, **kwargs):
         super().__init__()
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
         self.config = config
         self.layer_idx = layer_idx
+        self.n_heads = config.num_attention_heads
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = config.query_pre_attn_scalar**-0.5
@@ -141,15 +136,14 @@ class LinearGemma2Attention(nn.Module):
         self.k_proj = k_proj
         self.v_proj = v_proj
         self.o_proj = o_proj
-        self.attn_logit_softcapping = self.config.attn_logit_softcapping
+        self.attn_logit_softcapping = self.config.attn_logit_softcapping # create handle to deactivate
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
         self.attn_act_fn = attn_act_fn
         self.matmul_fn = matmul_fn
-        self.attn_softcap_fn = attn_softcap_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2Attention:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGemma2Attention:
         return cls(
             config=m.config,
             layer_idx=m.layer_idx,
@@ -159,7 +153,6 @@ class LinearGemma2Attention(nn.Module):
             o_proj=m.o_proj,
             attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
-            attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'tanh')],
         )
 
     def forward(
@@ -171,12 +164,13 @@ class LinearGemma2Attention(nn.Module):
         past_key_values: Cache | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
-        input_shape = hidden_states.shape[:-1]
+        _, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
+        input_shape = q_hidden.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_proj(q_hidden).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(k_hidden).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(v_hidden).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -200,6 +194,69 @@ class LinearGemma2Attention(nn.Module):
             **kwargs,
         )
 
+        # head-wise attention output
+        head_wise_attn_output = torch.einsum('BSHd, DHd -> HBSD', attn_output.detach(), self.o_proj.weight.reshape(-1, self.n_heads, self.head_dim))
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        attn_output = torch.cat([attn_output.unsqueeze(0), head_wise_attn_output])
         return attn_output, attn_weights
+    
+class CustomGemma2DecoderLayer(GradientCheckpointingLayer):
+    def __init__(self, hidden_size: int, self_attn: nn.Module, mlp: nn.Module,
+                 input_layernorm: nn.Module, post_attention_layernorm: nn.Module,
+                 pre_feedforward_layernorm: nn.Module, post_feedforward_layernorm: nn.Module):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.self_attn = self_attn
+        self.mlp = mlp
+        self.input_layernorm = input_layernorm
+        self.post_attention_layernorm = post_attention_layernorm
+        self.pre_feedforward_layernorm = pre_feedforward_layernorm
+        self.post_feedforward_layernorm = post_feedforward_layernorm
+
+    @classmethod
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomGemma2DecoderLayer:
+        return cls(
+            hidden_size=m.hidden_size,
+            self_attn=m.self_attn,
+            mlp=m.mlp,
+            input_layernorm=m.input_layernorm,
+            post_attention_layernorm=m.post_attention_layernorm,
+            pre_feedforward_layernorm=m.pre_feedforward_layernorm,
+            post_feedforward_layernorm=m.post_feedforward_layernorm,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hqkv_states = hidden_junction_hook(hidden_states, n=3)  # (4, B, N, d_model)
+        hqkv_states = self.input_layernorm(hqkv_states)
+
+        # Self Attention
+        attn_output, _ = self.self_attn(
+            hidden_states=hqkv_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            **kwargs,
+        )
+        attn_output = self.post_attention_layernorm(attn_output[0])  # (B, S, H, d_model)
+        hidden_states = residual + attn_output
+
+        # Fully Connected
+        residual = hidden_states
+        hgu_states = hidden_junction_hook(hidden_states, n=2)  # (3, B, N, d_model)
+        hgu_states = self.pre_feedforward_layernorm(hgu_states)
+        hidden_states = self.mlp(hgu_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states

@@ -4,17 +4,21 @@ import torch.nn as nn
 from nnsight import NNsight
 
 from linear_transformer.patching.registry import get_registry
+from linear_transformer.adapter.accessors import get_arch
+from linear_transformer.adapter.adapters import ModelAdapter
 
 
 def patch_model_for_lvp(
     model: nn.Module,
+    model_id: str, # TODO: change to automatic mapping over huggingface registery
     include: set[type] | None = None,
     exclude: set[type] | None = None,
     nnsight_wrapper: bool = True,
+    return_adapter: bool = True,
     dry_run: bool = False,
-    **kwargs: dict | None
+    **kwargs,
 ) -> nn.Module:
-    registry = get_registry()
+    registry = get_registry(model_id)
     replacements: list[tuple[str, type, type]] = []  # (path, old_cls, new_cls)
 
     def _walk(
@@ -50,6 +54,9 @@ def patch_model_for_lvp(
     if nnsight_wrapper:
         model = NNsight(model)
 
+    if return_adapter:
+        arch = get_arch(model_id)
+        model = ModelAdapter(model, arch)
     return model
 
 

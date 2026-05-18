@@ -11,24 +11,22 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import secant_silu, dtd_softmax
-from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
-from linear_transformer.models.utils import baseline_hidden_hook
+from linear_transformer.models.utils import CustomModule, hidden_junction_hook, gradient_junction_hook
 
 
-class FrozenLlama2RMSNorm(nn.Module):
+class CustomLlama2RMSNorm(CustomModule):
 
     def __init__(self, weight: nn.Parameter, variance_epsilon: float, norm_approx: str | None = None) -> None:
         super().__init__()
-        self.r = nn.Parameter(torch.ones(123))
         self.weight = weight
         self.variance_epsilon = variance_epsilon
         self.norm_approx = norm_approx
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2RMSNorm:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomLlama2RMSNorm:
         return cls(
             weight=m.weight,
             variance_epsilon=m.variance_epsilon,
@@ -38,36 +36,22 @@ class FrozenLlama2RMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
-        baseline_hidden = baseline_hidden_hook()
-        dynamic_mask = baseline_hidden_hook()
-
+        
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-
-        if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
-            if self.norm_approx == 'dynamic_thr':
-                baseline_hidden = baseline_hidden.to(torch.float32)
-                clean_norm = hidden_states.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
-                sim = torch.cosine_similarity(hidden_states, baseline_hidden, dim=-1).unsqueeze(-1)
-                sin2 = (1 - sim.pow(2)).clamp(min=0)
-                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
-                dynamic_mask = f_diff >= 0.0
-            rms_term = torch.rsqrt(variance + self.variance_epsilon)
-            rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
-            hidden_states = hidden_states * rms_term
-            return self.weight.detach() * hidden_states.to(input_dtype)
+        rms_term = torch.rsqrt(variance + self.variance_epsilon)
 
         # frozen
         if self.norm_approx == 'frozen':
-            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon).detach()
+            hidden_states = hidden_states * rms_term.detach()
             return self.weight.detach() * hidden_states.to(input_dtype)
+        
         # original
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * rms_term
         return self.weight * hidden_states.to(input_dtype)
 
 
 
-class FrozenLlama2SwiGLU(nn.Module):
+class CustomLlamaMLP(CustomModule):
 
     def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()
@@ -78,7 +62,7 @@ class FrozenLlama2SwiGLU(nn.Module):
         self.mul_fn = mul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2SwiGLU:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomLlamaMLP:
         return cls(
             gate_proj=m.gate_proj,
             up_proj=m.up_proj,
@@ -88,10 +72,16 @@ class FrozenLlama2SwiGLU(nn.Module):
         )
 
     def forward(self, x):
-        down_proj = self.down_proj(
-            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x)) # self.mul_fn instead of '*'
-        )
-        return down_proj
+        x, gate_x, up_x = gradient_junction_hook(x)
+        # gate_x, up_x = x, x
+
+        gate_out = self.gate_proj(gate_x)
+        gate_act = self.act_fn(gate_out)
+        up_out = self.up_proj(up_x)
+        
+        z = self.mul_fn(gate_act, up_out)
+        down_out = self.down_proj(z)
+        return down_out
     
 def eager_attention_forward(
     module: nn.Module,
@@ -118,7 +108,7 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 @use_kernelized_func(apply_rotary_pos_emb)
-class FrozenLlama2Attention(nn.Module):
+class CustomLlama2Attention(CustomModule):
     """Llama2 attention, largely unchanged"""
 
     def __init__(self, config: LlamaConfig, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
@@ -126,6 +116,7 @@ class FrozenLlama2Attention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.n_heads = config.num_attention_heads
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
@@ -140,7 +131,7 @@ class FrozenLlama2Attention(nn.Module):
         self.matmul_fn = matmul_fn
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs: dict | None) -> FrozenLlama2Attention:
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomLlama2Attention:
         return cls(
             config=m.config,
             layer_idx=m.layer_idx,
@@ -160,12 +151,14 @@ class FrozenLlama2Attention(nn.Module):
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_shape = hidden_states.shape[:-1]
+        hidden_states, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
+        # q_hidden, k_hidden, v_hidden = hidden_states, hidden_states, hidden_states
+        input_shape = q_hidden.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_proj(q_hidden).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(k_hidden).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(v_hidden).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -187,6 +180,63 @@ class FrozenLlama2Attention(nn.Module):
             **kwargs,
         )
 
+        # head-wise attention output
+        head_wise_attn_output = torch.einsum('BSHd, DHd -> HBSD', attn_output.detach(), self.o_proj.weight.reshape(-1, self.n_heads, self.head_dim))
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        attn_output = torch.cat([attn_output.unsqueeze(0), head_wise_attn_output])
         return attn_output, attn_weights
+    
+class CustomLlamaDecoderLayer(GradientCheckpointingLayer):
+    def __init__(self, hidden_size: int, self_attn: nn.Module, mlp: nn.Module, input_layernorm: nn.Module, post_attention_layernorm: nn.Module):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        self.self_attn = self_attn
+
+        self.mlp = mlp
+        self.input_layernorm = input_layernorm
+        self.post_attention_layernorm = post_attention_layernorm
+
+    @classmethod
+    def from_module(cls, m: nn.Module, **kwargs) -> CustomLlamaDecoderLayer:
+        return cls(
+            hidden_size=m.hidden_size,
+            self_attn = m.self_attn,
+            mlp = m.mlp,
+            input_layernorm = m.input_layernorm,
+            post_attention_layernorm = m.post_attention_layernorm,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hqkv_states = hidden_junction_hook(hidden_states, n=3)
+        hqkv_states = self.input_layernorm(hqkv_states)
+        # Self Attention
+        attn_output, _ = self.self_attn(
+            hidden_states=hqkv_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + attn_output[0]
+
+        # Fully Connected
+        residual = hidden_states
+        gu_hidden_states = hidden_junction_hook(hidden_states, n=2)
+        gu_hidden_states = self.post_attention_layernorm(gu_hidden_states)
+        hidden_states = self.mlp(gu_hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states

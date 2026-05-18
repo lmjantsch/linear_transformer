@@ -3,11 +3,6 @@ from __future__ import annotations
 import gc
 import pytest
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
-
-from linear_transformer import patch_model_for_lvp
-from linear_transformer.modules import dtd_softmax, secant_softmax, constant_softmax, pos_ratio_softmax, integrated_softmax, sec_jac_softmax
 
 PROMPTS = [
     "Paris is the capital of",
@@ -22,7 +17,7 @@ DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B"
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--device",
-        default="cuda:0" if torch.cuda.is_available() else "cpu",
+        default="cuda:0",
         help="Device for model and input tensors (e.g. cuda:0, cuda:1, cpu).",
     )
     parser.addoption(

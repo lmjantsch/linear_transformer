@@ -29,7 +29,7 @@ def test_bilinear_matmul_conservation(device: torch.device) -> None:
     x = torch.randn(4, 8, 32, requires_grad=True, device=device)
     y = torch.randn(4, 32, 16, requires_grad=True, device=device)
     t = torch.randn(4, 8, 16, device=device)
-    out = BilinearMatmul.apply(x, y)
+    out = BilinearMatmul.apply(x, y, 0.5, 0.5)
     out.backward(t)
     err = get_conservation_error(out, [x, y], t)
     register_error("BilinearMatmul", err)

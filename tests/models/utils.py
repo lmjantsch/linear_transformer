@@ -7,11 +7,8 @@ from typing import Callable
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
-from nnsight import NNsight
 
-from linear_transformer import patch_model_for_lvp
-
+from linear_transformer.adapter.adapters import ModelAdapter
 
 @dataclass
 class ArchAccessors:
@@ -129,51 +126,58 @@ def get_kl_values_from_logits(model_cache, baseline_cache):
 
 
 # -------------------------------------------------------
-# Caching 
+# Caching
 # -------------------------------------------------------
 
-# model = AutoModelForCausalLM.from_pretrained(
-#         model_id, torch_dtype=dtype, attn_implementation='eager'
-#     ).to(device).eval()
-#     model = patch_model_for_lvp(model, **lvp_config)
-
-def detach_and_move_to_device(cache: dict, device: str | torch.device):
+def detach_and_move_to_device(cache: dict, device: str | torch.device) -> None:
     if isinstance(device, str):
         device = torch.device(device)
-
     for key in list(cache):
         if isinstance(cache[key], dict):
             detach_and_move_to_device(cache[key], device)
         elif isinstance(cache[key], torch.Tensor):
             cache[key] = cache[key].detach().to(device)
-        else:
-            continue
 
 
-def cache_forward_and_backward(
+def _backward_loop(cache: dict, num_layers: int) -> None:
+    """Fill *_grad entries; subtract skip-connection contributions to isolate each sub-path."""
+    for j in range(num_layers - 1, -1, -1):
+        for k in list(cache[j])[::-1]:
+            if k == 'ln1_in':  # isolate attention path: subtract residual-stream grad at mid
+                cache[j][k + '_grad'] = (
+                    cache[j][k].grad.save() - cache[j]['mid_grad']
+                ).detach()
+            elif k == 'ln2_in':  # isolate MLP path: subtract residual-stream grad at out
+                cache[j][k + '_grad'] = (
+                    cache[j][k].grad.save() - cache[j]['out_grad']
+                ).detach()
+            else:
+                cache[j][k + '_grad'] = cache[j][k].grad.save().detach()
+
+
+def cache_org_model(
     model_id: str,
-    model: AutoModelForCausalLM,
+    model,
     batch_inputs: dict,
-    cache: dict,
 ) -> dict:
+    """Cache activations and LVP gradients for an unpatched NNsight model."""
     arc = get_arch(model_id)
     layers = arc.layers(model)
-    
     num_layers = len(layers)
     cache: dict = {i: {} for i in range(num_layers)}
 
     try:
-        with model.trace(**batch_inputs) as tracer:
+        with model.trace(**batch_inputs):
             cache['emb'] = layers[0].input.save()
 
             for i, layer in enumerate(layers):
-                cache[i]['ln1_in']   = getattr(layer, arc.ln1).input.save()
-                cache[i]['ln1_out']  = getattr(layer, arc.ln1).output.save()
-                cache[i]['attn_out'] = getattr(layer, arc.attn).output[0].save()
+                # cache[i]['ln1_in']   = getattr(layer, arc.ln1).input.save()
+                # cache[i]['ln1_out']  = getattr(layer, arc.ln1).output.save()
+                # cache[i]['attn_out'] = getattr(layer, arc.attn).output[0].save()
                 cache[i]['mid']      = getattr(layer, arc.ln2).input.save()
-                cache[i]['ln2_in']   = getattr(layer, arc.ln2).input.save()
-                cache[i]['ln2_out']  = getattr(layer, arc.ln2).output.save()
-                cache[i]['mlp_out']  = getattr(layer, arc.mlp).output.save()
+                # cache[i]['ln2_in']   = getattr(layer, arc.ln2).input.save()
+                # cache[i]['ln2_out']  = getattr(layer, arc.ln2).output.save()
+                # cache[i]['mlp_out']  = getattr(layer, arc.mlp).output.save()
                 cache[i]['out']      = layer.output.save()
 
             logits = model.lm_head.output
@@ -182,18 +186,53 @@ def cache_forward_and_backward(
             cache['loss'] = loss.save()
 
             with loss.backward():
-                for j in range(num_layers - 1, -1, -1):
-                    for k in list(cache[j])[::-1]:
-                        if k == 'ln1_in': # subtract skip-connection grad to isolate the attention path
-                            cache[j][k + '_grad'] = (
-                                cache[j][k].grad.save() - cache[j]['mid_grad']
-                            ).detach()
-                        elif k == 'ln2_in': # subtract skip-connection grad to isolate the MLP path
-                            cache[j][k + '_grad'] = (
-                                cache[j][k].grad.save() - cache[j]['out_grad']
-                            ).detach()
-                        else:
-                            cache[j][k + '_grad'] = cache[j][k].grad.save().detach()
+                _backward_loop(cache, num_layers)
+                cache['emb_grad'] = cache['emb'].grad.save()
+    finally:
+        detach_and_move_to_device(cache, 'cpu')
+    return cache
+
+
+def cache_patched_model(
+    model_id: str,
+    model: ModelAdapter,
+    batch_inputs: dict,
+) -> dict:
+    """Cache activations and LVP gradients for a patched NNsight model.
+
+    'mid' is taken from gradient_junction_hook_1.input (pre-hook, original space) so it
+    is directly comparable to org_model_cache['mid'] in identity tests.
+    'ln1_in' and 'ln2_in' are taken post-hook (×n sources) for conservation tests that
+    are internal to the patched model.
+
+    NOTE: the skip-connection subtractions in _backward_loop mix pre-hook gradients
+    (mid_grad, out_grad — original space) with post-hook saved tensors (ln1_in, ln2_in
+    — ×n space).  Verify / replace with gradient_junction_hook outputs if needed.
+    """
+    num_layers = model.n_layers
+    cache: dict = {i: {} for i in range(num_layers)}
+
+    try:
+        with model.model.trace(**batch_inputs):
+            cache['emb'] = model.embed.output.save()
+
+            for i, layer in enumerate(model.wrapped_layers):
+                # cache[i]['ln1_in']   = getattr(layer, arc.ln1).input.save()   # (×n sources)
+                # cache[i]['ln1_out']  = getattr(layer, arc.ln1).output.save()  # (×n sources)
+                # cache[i]['attn_out'] = getattr(layer, arc.attn).output[0].save()
+                cache[i]['mid']      = layer.residual_mid(detached=False).save()
+                # cache[i]['ln2_in']   = getattr(layer, arc.ln2).input.save()   # (×n sources)
+                # cache[i]['ln2_out']  = getattr(layer, arc.ln2).output.save()  # (×n sources)
+                # cache[i]['mlp_out']  = getattr(layer, arc.mlp).output.save()
+                cache[i]['out']      = layer.residual_post(detached=False).save()
+
+            logits = model.lm_head.output
+            cache['logits'] = logits.save()
+            loss = logits[:, -1].max(dim=-1).values.sum()
+            cache['loss'] = loss.save()
+
+            with loss.backward():
+                _backward_loop(cache, num_layers)
                 cache['emb_grad'] = cache['emb'].grad.save()
     finally:
         detach_and_move_to_device(cache, 'cpu')
