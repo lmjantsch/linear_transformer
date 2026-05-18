@@ -4,3 +4,6 @@
 .vscode/
 .claude/
 __pycache__/
+
+# files
+test.ipynb
