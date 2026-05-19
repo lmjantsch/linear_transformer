@@ -134,13 +134,13 @@ class CustomGPT2Attention(CustomModule):
                 if isinstance(past_key_values, EncoderDecoderCache)
                 else past_key_values
             )
+        _, B, S, D = hidden_states.shape
+        q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)[1:].view(3, self.num_heads, B, S, D)
+        query_states = self._head_wise_projection(q_hidden, self.q_proj)
+        key_states = self._head_wise_projection(k_hidden, self.k_proj)
+        value_states = self._head_wise_projection(v_hidden, self.v_proj)
 
-        _, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
-        query_states = self.q_proj(q_hidden)
-        key_states = self.k_proj(k_hidden)
-        value_states = self.v_proj(v_hidden)
-
-        shape = (*q_hidden.shape[:-1], -1, self.head_dim)
+        shape = (B, S, -1, self.head_dim)
         query_states = query_states.view(shape).transpose(1, 2)
         key_states = key_states.view(shape).transpose(1, 2)
         value_states = value_states.view(shape).transpose(1, 2)
@@ -170,6 +170,16 @@ class CustomGPT2Attention(CustomModule):
 
         return attn_output, attn_weights
     
+    def _head_wise_projection(self, hidden_state: torch.Tensor, proj: nn.Linear) -> torch.Tensor:
+        _, B, S, D = hidden_state.shape
+
+        weight_view = proj.weight.view(self.num_heads, self.head_dim, D)
+        out = torch.einsum("HBSD, HdD -> BSHd", hidden_state, weight_view)
+
+        if proj.bias is not None:
+            out += proj.bias.view(self.num_heads, self.head_dim)
+        return out.contiguous()
+    
 
 class CustomGPT2Block(GradientCheckpointingLayer):
     def __init__(self, ln_1: nn.Module, attn: nn.Module, ln_2: nn.Module, mlp: nn.Module):
@@ -197,7 +207,7 @@ class CustomGPT2Block(GradientCheckpointingLayer):
             raise NotImplementedError("Cross-attention is not supported.")
 
         residual = hidden_states
-        hkqv_states = hidden_junction_hook(hidden_states, n=3)  # (4, B, N, d_model)
+        hkqv_states = hidden_junction_hook(hidden_states, n=(3* self.attn.num_heads))  # (4, B, N, d_model)
         hkqv_states = self.ln_1(hkqv_states)
         attn_out, _ = self.attn(
             hidden_states=hkqv_states,

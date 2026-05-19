@@ -81,18 +81,18 @@ class ModelAdapter(Adapter):
         else:
             raise NotImplementedError(f"Type '{type}' is not implemented.")
 
-    def emb_source(self, detached=True):
-        if detached:
-            return self.embed.output.detach()
-        return self.embed.output
+    def emb_output(self, detached=True):
+        # Embedding source is input of first layer (GPT2 has 2 different embeddings)
+        first_layer = next(self.wrapped_layers)
+        return first_layer.residual_pre_state(detached=detached)
     
-    def logit_grad(self, detach=False):
-        if detach:
+    def logits_input(self, detached=False):
+        if detached:
             return self.lm_head.input.detach()
         return self.lm_head.input
     
-    def logits(self, detach=False):
-        if detach:
+    def logits(self, detached=False):
+        if detached:
             return self.lm_head.output.detach()
         return self.lm_head.output
         
@@ -106,37 +106,52 @@ class LayerAdapter(Adapter):
 
         self._attach_arch_accessor(arch, layer, LAYER_SCOPE)
 
-    def residual_pre(self, detached=True):
+    def residual_pre_state(self, detached=True) -> torch.Tensor:
         if detached:
             return self.layer.source.hidden_junction_hook_0.input.detach()
         return self.layer.source.hidden_junction_hook_0.input
     
-    def residual_mid(self, detached=True):
+    def residual_mid_state(self, detached=True) -> torch.Tensor:
         if detached:
             return self.layer.source.hidden_junction_hook_1.input.detach()
         return self.layer.source.hidden_junction_hook_1.input
     
-    def residual_post(self, detached=True):
+    def residual_post_state(self, detached=True) -> torch.Tensor:
         if detached:
             return self.layer.output.detach()
         return self.layer.output 
     
-    def attn_source(self, detached=True):
+    def attn_output(self, detached=True) -> torch.Tensor:
         if detached:
-            return self.attention_interface.output[0][1:].detach()
-        return self.attention_interface.output[0][1:]
+            return self.attn.output[0][0].detach()
+        return self.attn.output[0][0]
     
-    def mlp_source(self, detach=True):
-        if detach:
+    def head_wise_attn_output(self, detached=True) -> torch.Tensor:
+        if detached:
+            return self.attn.output[0][1:].detach()
+        return self.attn.output[0][1:]
+    
+    def mlp_output(self, detached=True) -> torch.Tensor:
+        if detached:
             return self.mlp.output.detach()
         return self.mlp.output
     
-    def qkv_grad(self, detach=False):
-        if detach:
-            return self.layer.source.hidden_junction_hook_0.output.detach()
-        return self.layer.source.hidden_junction_hook_0.output
+    def attn_input(self, detached=False) -> torch.Tensor: # B, S, D
+        if detached:
+            return self.layer.source.hidden_junction_hook_0.output[0].detach()
+        return self.layer.source.hidden_junction_hook_0.output[0]
+
+    def qkv_input(self, detached=False) -> torch.Tensor: # 3, B, S, D
+        if detached:
+            return self.layer.source.hidden_junction_hook_0.output[1:].detach()
+        return self.layer.source.hidden_junction_hook_0.output[1:]
     
-    def gu_grad(self, detach=False):
-        if detach:
-            return self.layer.source.hidden_junction_hook_1.output.detach()
-        return self.layer.source.hidden_junction_hook_1.output
+    def mlp_input(self, detached=False) -> torch.Tensor: # B, S, D
+        if detached:
+            return self.layer.source.hidden_junction_hook_1.output[0].detach()
+        return self.layer.source.hidden_junction_hook_1.output[0]
+    
+    def gu_input(self, detached=False) -> torch.Tensor: # 2, B, S, D
+        if detached:
+            return self.layer.source.hidden_junction_hook_1.output[1:].detach()
+        return self.layer.source.hidden_junction_hook_1.output[1:]

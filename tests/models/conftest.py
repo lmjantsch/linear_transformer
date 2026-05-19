@@ -30,7 +30,7 @@ PROMPTS = [
 ]
 
 MODEL_CONFIG_MAPPING: dict[str, list[tuple[str, dict]]] = {
-    ("gpt2", "gpt2"): [
+    # ("gpt2", "gpt2"): [
         # ("fr_norm", {
         #     "frozen_norm": True
         # }),
@@ -46,7 +46,7 @@ MODEL_CONFIG_MAPPING: dict[str, list[tuple[str, dict]]] = {
         # ("sec_jac_softmax", {
         #     "attn_act_fn": "sec_jac_softmax",
         # }),
-    ],
+    # ],
     ("qwen2.5", "Qwen/Qwen2.5-0.5B"): [
         # ("fr_norm", {
         #     "frozen_norm": True

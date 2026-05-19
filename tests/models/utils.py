@@ -220,11 +220,11 @@ def cache_patched_model(
                 # cache[i]['ln1_in']   = getattr(layer, arc.ln1).input.save()   # (×n sources)
                 # cache[i]['ln1_out']  = getattr(layer, arc.ln1).output.save()  # (×n sources)
                 # cache[i]['attn_out'] = getattr(layer, arc.attn).output[0].save()
-                cache[i]['mid']      = layer.residual_mid(detached=False).save()
+                cache[i]['mid']      = layer.residual_mid_state(detached=False).save()
                 # cache[i]['ln2_in']   = getattr(layer, arc.ln2).input.save()   # (×n sources)
                 # cache[i]['ln2_out']  = getattr(layer, arc.ln2).output.save()  # (×n sources)
                 # cache[i]['mlp_out']  = getattr(layer, arc.mlp).output.save()
-                cache[i]['out']      = layer.residual_post(detached=False).save()
+                cache[i]['out']      = layer.residual_post_state(detached=False).save()
 
             logits = model.lm_head.output
             cache['logits'] = logits.save()

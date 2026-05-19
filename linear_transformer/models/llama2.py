@@ -151,14 +151,14 @@ class CustomLlama2Attention(CustomModule):
         past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
-        # q_hidden, k_hidden, v_hidden = hidden_states, hidden_states, hidden_states
-        input_shape = q_hidden.shape[:-1]
+        _, B, S, D = hidden_states.shape
+        q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)[1:].view(3, self.n_heads, B, S, D)
+        input_shape = (B, S)
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(q_hidden).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(k_hidden).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(v_hidden).view(hidden_shape).transpose(1, 2)
+        query_states = self._head_wise_projection(q_hidden, self.q_proj).view(hidden_shape).transpose(1, 2)
+        key_states = self._head_wise_projection(k_hidden, self.k_proj, is_grouped=True).view(hidden_shape).transpose(1, 2)
+        value_states = self._head_wise_projection(v_hidden, self.v_proj, is_grouped=True).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -186,6 +186,37 @@ class CustomLlama2Attention(CustomModule):
         attn_output = self.o_proj(attn_output)
         attn_output = torch.cat([attn_output.unsqueeze(0), head_wise_attn_output])
         return attn_output, attn_weights
+    
+    def _head_wise_projection(self, hidden_state: torch.Tensor, proj: nn.Linear, is_grouped:bool = False) -> torch.Tensor:
+        _, B, S, D = hidden_state.shape
+        
+        if is_grouped:
+            # hidden_state = hidden_state.view(self.num_key_value_groups, self.config.num_key_value_heads, B, S, D)
+            # weight_view = proj.weight.view(self.config.num_key_value_heads, self.head_dim, D)
+            # out = torch.einsum("GHBSD, HdD -> BSGHd", hidden_state, weight_view)
+
+            # if proj.bias is not None:
+            #     out += proj.bias.view(self.config.num_key_value_heads, self.head_dim)
+            # return out.reshape(B, S, self.n_heads, self.head_dim)
+            hidden_state = hidden_state[0]
+            out = proj(hidden_state).view(B, S, self.config.num_key_value_heads, self.head_dim)
+            # out = torch.repeat_interleave(out, dim=2, repeats=self.num_key_value_groups)
+            return out
+
+        weight_view = proj.weight.view(self.n_heads, self.head_dim, D)
+        out = torch.einsum("HBSD, HdD -> BSHd", hidden_state, weight_view)
+
+        if proj.bias is not None:
+            out += proj.bias.view(self.n_heads, self.head_dim)
+        # return out.contiguous()
+    
+        hidden_state = hidden_state[0]
+        out2 = proj(hidden_state).view(B, S, self.n_heads, self.head_dim)
+
+        print('HERE!!!!!!', torch.allclose(out, out2), flush=True)
+        raise
+        return out
+
     
 class CustomLlamaDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, hidden_size: int, self_attn: nn.Module, mlp: nn.Module, input_layernorm: nn.Module, post_attention_layernorm: nn.Module):
@@ -219,7 +250,7 @@ class CustomLlamaDecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         residual = hidden_states
-        hqkv_states = hidden_junction_hook(hidden_states, n=3)
+        hqkv_states = hidden_junction_hook(hidden_states, n=(3 * self.self_attn.n_heads))
         hqkv_states = self.input_layernorm(hqkv_states)
         # Self Attention
         attn_output, _ = self.self_attn(

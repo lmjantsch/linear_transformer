@@ -96,10 +96,10 @@ def eager_attention_forward(
     if scaling is None:
         scaling = module.head_dim**-0.5
 
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
+    # key_states = repeat_kv(key, module.num_key_value_groups)
+    # value_states = repeat_kv(value, module.num_key_value_groups)
 
-    attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
+    attn_weights = module.matmul_fn(query, key.transpose(2, 3)) * scaling
 
     if softcap is not None:
         attn_weights = attn_weights / softcap
@@ -111,7 +111,7 @@ def eager_attention_forward(
     # upcast attention to fp32
     attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     # attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = module.matmul_fn(attn_weights, value_states)
+    attn_output = module.matmul_fn(attn_weights, value)
     attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
@@ -164,13 +164,14 @@ class CustomGemma2Attention(CustomModule):
         past_key_values: Cache | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
-        _, q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)
-        input_shape = q_hidden.shape[:-1]
+        _, B, S, D = hidden_states.shape
+        q_hidden, k_hidden, v_hidden = gradient_junction_hook(hidden_states)[1:].view(3, self.n_heads, B, S, D)
+        input_shape = (B, S)
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(q_hidden).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(k_hidden).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(v_hidden).view(hidden_shape).transpose(1, 2)
+        query_states = self._head_wise_projection(q_hidden, self.q_proj).view(hidden_shape).transpose(1, 2)
+        key_states = self._head_wise_projection(k_hidden, self.k_proj, is_grouped=True).view(hidden_shape).transpose(1, 2)
+        value_states = self._head_wise_projection(v_hidden, self.v_proj, is_grouped=True).view(hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -200,6 +201,25 @@ class CustomGemma2Attention(CustomModule):
         attn_output = self.o_proj(attn_output)
         attn_output = torch.cat([attn_output.unsqueeze(0), head_wise_attn_output])
         return attn_output, attn_weights
+    
+    def _head_wise_projection(self, hidden_state: torch.Tensor, proj: nn.Linear, is_grouped:bool = False) -> torch.Tensor:
+        _, B, S, D = hidden_state.shape
+        
+        if is_grouped:
+            hidden_state = hidden_state.view(self.num_key_value_groups, self.config.num_key_value_heads, B, S, D)
+            weight_view = proj.weight.view(self.config.num_key_value_heads, self.head_dim, D)
+            out = torch.einsum("GHBSD, HdD -> BSGHd", hidden_state, weight_view)
+
+            if proj.bias is not None:
+                out += proj.bias.view(self.config.num_key_value_heads, self.head_dim)
+            return out.reshape(B, S, self.n_heads, self.head_dim)
+
+        weight_view = proj.weight.view(self.n_heads, self.head_dim, D)
+        out = torch.einsum("HBSD, HdD -> BSHd", hidden_state, weight_view)
+
+        if proj.bias is not None:
+            out += proj.bias.view(self.n_heads, self.head_dim)
+        return out.contiguous()
     
 class CustomGemma2DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, hidden_size: int, self_attn: nn.Module, mlp: nn.Module,
@@ -236,7 +256,7 @@ class CustomGemma2DecoderLayer(GradientCheckpointingLayer):
         **kwargs,
     ) -> torch.Tensor:
         residual = hidden_states
-        hqkv_states = hidden_junction_hook(hidden_states, n=3)  # (4, B, N, d_model)
+        hqkv_states = hidden_junction_hook(hidden_states, n=(3 * self.self_attn.n_heads))  # (1 + 3 * H, B, N, d_model)
         hqkv_states = self.input_layernorm(hqkv_states)
 
         # Self Attention
