@@ -4,10 +4,10 @@ from typing import Callable
 
 import torch.nn as nn
 
-from linear_transformer.models.generic import ModularLayerNorm
-from linear_transformer.models.llama2 import ModularLlama2RMSNorm, ModularLlama2MLP, ModularLlama2Attention
-from linear_transformer.models.gemma2 import ModularGemma2RMSNorm, ModularGemma2MLP, ModularGemma2Attention
-from linear_transformer.models.gpt2 import ModularGPT2MLP, ModularGPT2Attention
+from modular_transformer.models.generic import ModularLayerNorm
+from modular_transformer.models.llama2 import ModularLlama2RMSNorm, ModularLlama2MLP, ModularLlama2Attention
+from modular_transformer.models.gemma2 import ModularGemma2RMSNorm, ModularGemma2MLP, ModularGemma2Attention
+from modular_transformer.models.gpt2 import ModularGPT2MLP, ModularGPT2Attention
 
 # Populated below after all wrapper imports
 _REGISTRY: dict[type, Callable[[nn.Module], nn.Module]] = {}

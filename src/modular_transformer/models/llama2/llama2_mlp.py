@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from linear_transformer.modules import ACT_FN, BILINEAR_FN
+from modular_transformer.modules import ACT_FN, BILINEAR_FN
 
 
 class ModularLlama2MLP(nn.Module):

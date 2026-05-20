@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from linear_transformer.modules import ACT_FN
-from linear_transformer.models.utils import conv1d_to_linear
+from modular_transformer.modules import ACT_FN
+from modular_transformer.models.utils import conv1d_to_linear
 
 
 class ModularGPT2MLP(nn.Module):

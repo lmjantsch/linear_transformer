@@ -11,8 +11,8 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Attention, repeat_kv, apply_rotary_pos_emb
 
-from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.models.utils import expand_kv_linear
+from modular_transformer.modules import ACT_FN, BILINEAR_FN
+from modular_transformer.models.utils import expand_kv_linear
 
 class ModularGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""

@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linear-transformer"
+name = "modular-transformer"
 version = "0.1.0"
 description = "Layer-Wise Vector Propagation (LVP) for transformer attribution"
 readme = "CLAUDE.md"
@@ -36,8 +36,8 @@ dev = [
     "pytest-cov",
 ]
 
-[tool.setuptools]
-packages = ["linear_transformer"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-linear_transformer = ["py.typed"]
+modular_transformer = ["py.typed"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch.nn as nn
 from nnsight import NNsight
 
-from linear_transformer.patching.registry import get_registry
+from modular_transformer.patching.registry import get_registry
 
 
 def patch_model_for_lvp(

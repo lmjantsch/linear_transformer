@@ -7,7 +7,7 @@ import torch
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 from nnsight import NNsight
 
-from linear_transformer import patch_model_for_lvp
+from modular_transformer import patch_model_for_lvp
 
 from tests.models.utils import (
     get_arch,

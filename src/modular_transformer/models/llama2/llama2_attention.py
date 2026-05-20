@@ -4,12 +4,15 @@ import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs
+from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb, repeat_kv
 
-from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.models.utils import conv1d_to_linear, split_c_attn
+from modular_transformer.modules import ACT_FN, BILINEAR_FN
+from modular_transformer.models.utils import expand_kv_linear
 
 
-class ModularGPT2Attention(nn.Module):
+class ModularLlama2Attention(nn.Module):
 
     def __init__(
         self,
@@ -22,20 +25,16 @@ class ModularGPT2Attention(nn.Module):
         attn_act_fn: callable,
         matmul_fn: callable,
         attention_interface: callable,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim ** -0.5
+        self.attention_dropout = config.attention_dropout
         self.is_causal = True
-
-        self.scaling = 1.0
-        if config.scale_attn_weights:
-            self.scaling = self.head_dim ** -0.5
-        if config.scale_attn_by_inverse_layer_idx:
-            self.scaling /= float(layer_idx + 1)
 
         self.q_proj = q_proj
         self.k_proj = k_proj
@@ -46,15 +45,14 @@ class ModularGPT2Attention(nn.Module):
         self.attention_interface = attention_interface
 
     @classmethod
-    def from_module(cls, m: nn.Module, **kwargs) -> ModularGPT2Attention:
-        q_proj, k_proj, v_proj = split_c_attn(m.c_attn, m.embed_dim)
+    def from_module(cls, m: LlamaAttention, **kwargs) -> ModularLlama2Attention:
         return cls(
             config=m.config,
             layer_idx=m.layer_idx,
-            q_proj=q_proj,
-            k_proj=k_proj,
-            v_proj=v_proj,
-            o_proj=conv1d_to_linear(m.c_proj),
+            q_proj=m.q_proj,
+            k_proj=m.k_proj,
+            v_proj=m.v_proj,
+            o_proj=m.o_proj,
             attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
             attention_interface=ATTN_INTERFACE_FN[kwargs.get('attn_interface', 'eager')],
@@ -63,9 +61,10 @@ class ModularGPT2Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        past_key_values: Cache | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
-        **kwargs,
+        past_key_values: Cache | None = None,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -73,6 +72,9 @@ class ModularGPT2Attention(nn.Module):
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)  # (B, H, N, d_head)
         key_states   = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
@@ -83,6 +85,7 @@ class ModularGPT2Attention(nn.Module):
             key_states,
             value_states,
             attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
             **kwargs,
         )
@@ -93,26 +96,26 @@ class ModularGPT2Attention(nn.Module):
 
 
 def eager_attention_forward(
-    module: ModularGPT2Attention,
+    module: ModularLlama2Attention,
     query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    scaling: float | None = None,
+    scaling: float,
+    dropout: float = 0.0,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if scaling is None:
-        scaling = query.size(-1) ** -0.5
+    key_states = repeat_kv(key_states, module.num_key_value_groups)
+    value_states = repeat_kv(value_states, module.num_key_value_groups)
 
-    attn_weights = module.matmul_fn(query, key.transpose(-1, -2)) * scaling  # (B, H, N, N)
+    attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling  # (B, H, N, N)
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
     attn_weights = module.attn_act_fn(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-
-    attn_output = module.matmul_fn(attn_weights, value)
-    attn_output = attn_output.transpose(1, 2)
+    attn_output = module.matmul_fn(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
     return attn_output, attn_weights
 
 

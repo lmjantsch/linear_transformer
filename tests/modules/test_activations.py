@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from linear_transformer.modules.activations import (
+from modular_transformer.modules.activations import (
     IntegratedSoftmax,
     SecantGELUTanh,
     SecantJacobianSoftmax,

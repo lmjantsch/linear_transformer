@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 from nnsight import NNsight
 
-from linear_transformer import patch_model_for_lvp
+from modular_transformer import patch_model_for_lvp
 
 
 @dataclass

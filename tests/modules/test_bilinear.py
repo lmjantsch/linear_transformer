@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-from linear_transformer.modules.bilinear import BilinearMatmul, BilinearMul
+from modular_transformer.modules.bilinear import BilinearMatmul, BilinearMul
 from .utils import get_conservation_error, register_error
 
 torch.manual_seed(42)
