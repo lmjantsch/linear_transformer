@@ -4,10 +4,10 @@ from typing import Callable
 
 import torch.nn as nn
 
-from linear_transformer.models.generic import CustomLayerNorm, CustomLinear
-from linear_transformer.models.llama2 import FrozenLlama2RMSNorm, FrozenLlama2SwiGLU, FrozenLlama2Attention
-from linear_transformer.models.gemma2 import LinearGemma2RMSNorm, LinearGemma2GeGLU, LinearGemma2Attention
-from linear_transformer.models.gpt2 import CustomGPT2MLP, CustomGPT2Attention
+from linear_transformer.models.generic import ModularLayerNorm
+from linear_transformer.models.llama2 import ModularLlama2RMSNorm, ModularLlama2MLP, ModularLlama2Attention
+from linear_transformer.models.gemma2 import ModularGemma2RMSNorm, ModularGemma2MLP, ModularGemma2Attention
+from linear_transformer.models.gpt2 import ModularGPT2MLP, ModularGPT2Attention
 
 # Populated below after all wrapper imports
 _REGISTRY: dict[type, Callable[[nn.Module], nn.Module]] = {}
@@ -38,9 +38,7 @@ def _populate_registry() -> None:
     package import time.
     """
 
-    _REGISTRY[nn.Linear] = CustomLinear.from_module
-    _REGISTRY[nn.Conv1d] = CustomLinear.from_module
-    _REGISTRY[nn.LayerNorm] = CustomLayerNorm.from_module
+    _REGISTRY[nn.LayerNorm] = ModularLayerNorm.from_module
 
     try:
         from transformers.models.llama.modeling_llama import (
@@ -48,9 +46,9 @@ def _populate_registry() -> None:
             LlamaAttention,
             LlamaMLP,
         )
-        _REGISTRY[LlamaRMSNorm] = FrozenLlama2RMSNorm.from_module
-        _REGISTRY[LlamaAttention] = FrozenLlama2Attention.from_module
-        _REGISTRY[LlamaMLP] = FrozenLlama2SwiGLU.from_module
+        _REGISTRY[LlamaRMSNorm] = ModularLlama2RMSNorm.from_module
+        _REGISTRY[LlamaAttention] = ModularLlama2Attention.from_module
+        _REGISTRY[LlamaMLP] = ModularLlama2MLP.from_module
     except ImportError:
         pass
 
@@ -60,9 +58,9 @@ def _populate_registry() -> None:
             Qwen2Attention,
             Qwen2MLP,
         )
-        _REGISTRY[Qwen2RMSNorm] = FrozenLlama2RMSNorm.from_module
-        _REGISTRY[Qwen2Attention] = FrozenLlama2Attention.from_module
-        _REGISTRY[Qwen2MLP] = FrozenLlama2SwiGLU.from_module
+        _REGISTRY[Qwen2RMSNorm] = ModularLlama2RMSNorm.from_module
+        _REGISTRY[Qwen2Attention] = ModularLlama2Attention.from_module
+        _REGISTRY[Qwen2MLP] = ModularLlama2MLP.from_module
     except ImportError:
         pass
 
@@ -72,9 +70,9 @@ def _populate_registry() -> None:
             Gemma2Attention,
             Gemma2MLP,
         )
-        _REGISTRY[Gemma2RMSNorm] = LinearGemma2RMSNorm.from_module
-        _REGISTRY[Gemma2Attention] = LinearGemma2Attention.from_module
-        _REGISTRY[Gemma2MLP] = LinearGemma2GeGLU.from_module
+        _REGISTRY[Gemma2RMSNorm] = ModularGemma2RMSNorm.from_module
+        _REGISTRY[Gemma2Attention] = ModularGemma2Attention.from_module
+        _REGISTRY[Gemma2MLP] = ModularGemma2MLP.from_module
     except ImportError:
         pass
 
@@ -83,8 +81,8 @@ def _populate_registry() -> None:
             GPT2Attention,
             GPT2MLP,
         )
-        _REGISTRY[GPT2Attention] = CustomGPT2Attention.from_module
-        _REGISTRY[GPT2MLP] = CustomGPT2MLP.from_module
+        _REGISTRY[GPT2Attention] = ModularGPT2Attention.from_module
+        _REGISTRY[GPT2MLP] = ModularGPT2MLP.from_module
     except ImportError:
         pass
 

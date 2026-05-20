@@ -27,7 +27,7 @@ Attention applies Rule 4 twice (at $\mathbf{Q}\mathbf{K}^T$ and $\mathbf{A}\math
 
 Rules 2–4 are implemented as custom `torch.autograd.Function` nodes. Their `forward` executes standard math; their `backward` propagates $\mathbf{t}$ via the LVP rule instead of the true gradient.
 
-Rule 1 (linear layers) and norm layers are handled structurally: `Frozen*` wrappers detach the normalization factor and call the underlying `nn.Linear` directly — standard autograd then produces $\mathbf{W}^T \mathbf{t}$ automatically.
+Rule 1 (linear layers) and norm layers are handled structurally: `Modular*` wrappers detach the normalization factor — standard autograd then produces $\mathbf{W}^T \mathbf{t}$ automatically.
 
 **Usage:**
 ```python
@@ -47,23 +47,23 @@ with model.trace(**inputs):
 # Component attribution: (emb · emb_grad).sum() ≈ loss
 ```
 
-All kwargs to `patch_model_for_lvp` are forwarded to every `Frozen*` wrapper via its `from_module` classmethod. String keys are resolved against `ACT_FN` / `BILINEAR_FN` at construction time.
+All kwargs to `patch_model_for_lvp` are forwarded to every `Modular*` wrapper via its `from_module` classmethod. String keys are resolved against `ACT_FN` / `BILINEAR_FN` at construction time.
 
 ```python
 model = patch_model_for_lvp(
     model,
     # Attention softmax (Rule 3) — key into ACT_FN
-    attn_act_fn='dtd_softmax',       # default; see Attention Softmax Variants below
+    attn_act_fn='dtd_softmax',       # default 'softmax'; see Attention Softmax Variants below
     # QK and AV bilinear matmuls (Rule 4) — key into BILINEAR_FN
-    matmul_fn='bilinear_matmul',     # default; use 'matmul' for standard torch.matmul
+    matmul_fn='bilinear_matmul',     # default 'matmul' (standard torch.matmul)
     # Gated-MLP gate×up product (Rule 4) — key into BILINEAR_FN
-    mul_fn='bilinear_mul',           # default; use 'mul' for standard torch.mul
-    # MLP activation (Rule 2) — key into ACT_FN; defaults to model-specific LVP fn
-    mlp_act_fn='secant_silu',        # LLaMA/Qwen default; omit to use model default
+    mul_fn='bilinear_mul',           # default 'mul' (standard torch.mul)
+    # MLP activation (Rule 2) — key into ACT_FN; defaults to model-specific standard fn
+    mlp_act_fn='secant_silu',        # LLaMA/Qwen; 'secant_gelu_tanh' for GPT-2/Gemma2
     # Detach normalisation factor in RMSNorm / LayerNorm (Rule 1 linearisation)
-    frozen_norm=True,                # default; set False to allow gradients through norm
-    # Gemma2 only — softcap tanh (Rule 2) — key into ACT_FN
-    attn_softcap_fn='secant_tanh',   # default
+    norm_approx='frozen',            # default None (standard norm); 'frozen' detaches norm factor
+    # Attention interface — key into each model's ATTN_INTERFACE_FN
+    attn_interface='eager',          # default; currently only 'eager' is supported
 )
 ```
 
@@ -73,13 +73,23 @@ model = patch_model_for_lvp(
 linear_transformer/
 ├── __init__.py            # exports patch_model_for_lvp, register_lvp_module
 ├── modules/
-│   ├── activations.py     # Rule 2/3 autograd.Function nodes + functional wrappers
-│   └── bilinear.py        # BilinearMul, BilinearMatmul (Rule 4) + functional wrappers
+│   ├── activations.py     # Rule 2/3 autograd.Function nodes + functional wrappers + ACT_FN
+│   └── bilinear.py        # BilinearMul, BilinearMatmul (Rule 4) + BILINEAR_FN
 ├── models/
-│   ├── generic.py         # FrozenLayerNorm
-│   ├── gpt2.py            # FrozenGPT2MLP, FrozenGPT2Attention
-│   ├── llama2.py          # FrozenLlama2RMSNorm, FrozenLlama2SwiGLU, FrozenLlama2Attention
-│   └── gemma2.py          # FrozenGemma2RMSNorm, FrozenGemma2GeGLU, FrozenGemma2Attention
+│   ├── utils.py           # expand_kv_linear, conv1d_to_linear, split_c_attn
+│   ├── generic/
+│   │   └── layernorm.py   # ModularLayerNorm
+│   ├── gpt2/
+│   │   ├── gpt2_attention.py  # ModularGPT2Attention
+│   │   └── gpt2_mlp.py        # ModularGPT2MLP
+│   ├── llama2/
+│   │   ├── llama2_attention.py  # ModularLlama2Attention
+│   │   ├── llama2_mlp.py        # ModularLlama2MLP
+│   │   └── llama2_rmsnorm.py    # ModularLlama2RMSNorm
+│   └── gemma2/
+│       ├── gemma2_attention.py  # ModularGemma2Attention
+│       ├── gemma2_mlp.py        # ModularGemma2MLP
+│       └── gemma2_rmsnorm.py    # ModularGemma2RMSNorm
 └── patching/
     ├── registry.py        # _REGISTRY; register_lvp_module(); get_registry()
     └── patcher.py         # patch_model_for_lvp(model, include, exclude, nnsight_wrapper, dry_run, **kwargs)
@@ -89,23 +99,25 @@ linear_transformer/
 
 | Model | Attn wrapper | MLP wrapper | Norm wrapper |
 |-------|-------------|------------|-------------|
-| GPT-2 | `FrozenGPT2Attention` (no RoPE, fused c_attn) | `FrozenGPT2MLP` (tanh-GELU) | `FrozenLayerNorm` |
-| LLaMA 3.1 | `FrozenLlama2Attention` (RoPE + GQA) | `FrozenLlama2SwiGLU` (SiLU gate) | `FrozenLlama2RMSNorm` |
-| Qwen2.5 | `FrozenLlama2Attention` (RoPE + GQA) | `FrozenLlama2SwiGLU` (SiLU gate) | `FrozenLlama2RMSNorm` |
-| Gemma2 | `FrozenGemma2Attention` (RoPE + GQA + softcap) | `FrozenGemma2GeGLU` (tanh-GELU gate) | `FrozenGemma2RMSNorm` |
+| GPT-2 | `ModularGPT2Attention` (no RoPE, c_attn split to q/k/v) | `ModularGPT2MLP` (tanh-GELU) | `ModularLayerNorm` |
+| LLaMA 3.1 | `ModularLlama2Attention` (RoPE + GQA via expand_kv_linear) | `ModularLlama2MLP` (SiLU gate) | `ModularLlama2RMSNorm` |
+| Qwen2.5 | `ModularLlama2Attention` (RoPE + GQA via expand_kv_linear) | `ModularLlama2MLP` (SiLU gate) | `ModularLlama2RMSNorm` |
+| Gemma2 | `ModularGemma2Attention` (RoPE + GQA via expand_kv_linear + softcap) | `ModularGemma2MLP` (tanh-GELU gate) | `ModularGemma2RMSNorm` |
 
 ## Key Implementation Details
 
-- **Weight sharing:** `from_module(m)` stores references to original parameters — no weight copies, zero memory overhead.
+- **Weight sharing:** `from_module(m)` stores references to original parameters — no weight copies, zero memory overhead. Exception: KV projections in GQA models are expanded via `expand_kv_linear` (new tensor).
 - **Precision:** All rule computations cast to float32 internally, cast back to original dtype on return.
-- **Norm linearization:** `FrozenRMSNorm`/`FrozenLayerNorm` compute the normalization factor under `float32`. When `frozen_norm=True` (default) the factor is detached, making the layer linear in `x` so standard autograd gives $\mathbf{W}^T \mathbf{t}$. Set `frozen_norm=False` to allow gradients to flow through the norm.
-- **Attention softmax:** Controlled by `attn_act_fn` (default `'dtd_softmax'`). When `attn_weights.grad_fn` is `None` (no-grad context), the AV product falls back to plain `torch.matmul` regardless of `matmul_fn`.
-- **Bilinear products:** `matmul_fn` (default `'bilinear_matmul'`) is used for both the QK and AV matmuls. `mul_fn` (default `'bilinear_mul'`) is used for the gate×up product in gated MLPs.
-- **GQA:** `repeat_kv` expands K/V heads before attention (LLaMA/Gemma2).
-- **Gemma2 softcapping:** logit softcap function is controlled by `attn_softcap_fn` (default `'secant_tanh'`, Rule 2).
+- **Norm linearization:** Each norm module accepts `norm_approx` kwarg. `None` (default) runs the standard norm. `'frozen'` detaches the normalization factor and weight, making the layer linear in `x` so standard autograd gives $\mathbf{W}^T \mathbf{t}$.
+- **GQA:** K/V projections are pre-expanded via `expand_kv_linear` in `from_module`, replacing `repeat_kv` at forward time. The expanded projection has shape `(num_heads * d_head, d_model)`.
+- **GPT-2 Conv1D:** `split_c_attn` splits the fused `c_attn` Conv1D into separate `q_proj`, `k_proj`, `v_proj` nn.Linear layers. `conv1d_to_linear` converts a single Conv1D (transposes the weight).
+- **Attention softmax:** Controlled by `attn_act_fn` (default `'softmax'`).
+- **Bilinear products:** `matmul_fn` (default `'matmul'`) is used for QK and AV matmuls. `mul_fn` (default `'mul'`) is used for the gate×up product in gated MLPs.
+- **Gemma2 softcapping:** The logit softcap uses standard `torch.tanh` (hardcoded in `eager_attention_forward`).
+- **Attention interface:** Each model's attention module has an `ATTN_INTERFACE_FN` dict. Currently only `'eager'` is supported; selected via `attn_interface` kwarg.
 - **Function lookup:** String keys are resolved via `ACT_FN` (activations) and `BILINEAR_FN` (bilinear ops) in `linear_transformer/modules/`. Both dicts are importable from `linear_transformer.modules`.
 - **NNsight integration:** `patch_model_for_lvp` wraps the patched model in `NNsight` by default (`nnsight_wrapper=True`). Disable with `nnsight_wrapper=False`.
-- **Extending to new models:** Call `register_lvp_module(MyHFClass, MyFrozenWrapper.from_module)` before `patch_model_for_lvp`.
+- **Extending to new models:** Call `register_lvp_module(MyHFClass, MyModularWrapper.from_module)` before `patch_model_for_lvp`.
 
 ## ACT_FN and BILINEAR_FN Lookup Tables
 
@@ -125,12 +137,14 @@ String keys passed as kwargs to `patch_model_for_lvp` are resolved via these dic
 | `'secant_gelu_tanh'` | `SecantGELUTanh` | Rule 2 — tanh-approx GELU (GPT-2, Gemma2 MLP default) |
 | `'secant_silu'` | `SecantSiLU` | Rule 2 — SiLU/Swish (LLaMA/Qwen MLP default) |
 | `'secant_relu'` | `SecantReLU` | Rule 2 — ReLU |
-| `'secant_tanh'` | `SecantTanh` | Rule 2 — tanh (Gemma2 softcap default) |
-| `'dtd_softmax'` | `DTDSoftmax` | Rule 3 DTD — $\mathbf{t} - \mathbf{s}(\mathbf{s}^T\mathbf{t})$, conservation-preserving (attn default) |
+| `'secant_tanh'` | `SecantTanh` | Rule 2 — tanh |
+| `'dtd_softmax'` | `DTDSoftmax` | Rule 3 DTD — $\mathbf{t} - \mathbf{s}(\mathbf{s}^T\mathbf{t})$, conservation-preserving |
 | `'sec_jac_softmax'` | `SecantJacobianSoftmax` | Rule 3 analytic secant-Jacobian |
 | `'integrated_softmax'` | `IntegratedSoftmax` | Rule 3 integrated gradients (10 steps) |
 | `'secant_softmax'` | `SecantSoftmax` | element-wise secant — $\mathbf{s}/(x+\epsilon) \cdot \sum t_j$ |
 | `'pos_ratio_softmax'` | `PosRationSoftmax` | clips x to positive, uniform split |
+| `'outer_prod_softmax'` | `OuterProdSoftmax` | outer-product projection onto x |
+| `'frozen_denom_softmax'` | `FrozenDenomSoftmax` | detached denominator |
 | `'constant_softmax'` | detached `F.softmax` | treats attention weights as a constant |
 
 ### `BILINEAR_FN` — `linear_transformer/modules/bilinear.py`
@@ -139,5 +153,5 @@ String keys passed as kwargs to `patch_model_for_lvp` are resolved via these dic
 |-----|----------|-------|
 | `'mul'` | `torch.mul` | standard element-wise product |
 | `'matmul'` | `torch.matmul` | standard matmul |
-| `'bilinear_mul'` | `BilinearMul` | Rule 4 — uniform split, gate×up default |
-| `'bilinear_matmul'` | `BilinearMatmul` | Rule 4 — uniform split, QK/AV default |
+| `'bilinear_mul'` | `BilinearMul` | Rule 4 — uniform split, gate×up |
+| `'bilinear_matmul'` | `BilinearMatmul` | Rule 4 — uniform split, QK/AV |

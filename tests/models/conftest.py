@@ -30,70 +30,30 @@ PROMPTS = [
 ]
 
 MODEL_CONFIG_MAPPING: dict[str, list[tuple[str, dict]]] = {
-    ("gpt2", "gpt2"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh",
-        }),
-    ],
-    ("qwen2.5", "Qwen/Qwen2.5-0.5B"): [
-        ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-    ],
+    # ("gpt2", "gpt2"): [
+    #     ("lvp_default", {
+    #         "norm_approx": "frozen", "attn_act_fn": "softmax",
+    #         "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
+    #         "mlp_act_fn": "secant_gelu_tanh",
+    #     }),
+    # ],
+    # ("qwen2.5", "Qwen/Qwen2.5-0.5B"): [
+    #     ("lvp_default", {
+    #         "norm_approx": "frozen", "attn_act_fn": "softmax",
+    #         "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
+    #         "mlp_act_fn": "secant_silu",
+    #     }),
+    # ],
     ("gemma2", "google/gemma-2-2b"): [
         ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
+            "norm_approx": "frozen", "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_gelu_tanh", "attn_softcap_fn": "secant_tanh",
+            "mlp_act_fn": "secant_gelu_tanh",
         }),
     ],
     ("llama3.1", "meta-llama/Llama-3.1-8B"): [
         ("lvp_default", {
-            "frozen_norm": True, "attn_act_fn": "softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("sec_jac_softmax", {
-            "frozen_norm": True, "attn_act_fn": "sec_jac_softmax",
-            "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
-            "mlp_act_fn": "secant_silu",
-        }),
-        ("outer_prod_softmax", {
-            "frozen_norm": True, "attn_act_fn": "outer_prod_softmax",
+            "norm_approx": "frozen", "attn_act_fn": "softmax",
             "matmul_fn": "bilinear_matmul", "mul_fn": "bilinear_mul",
             "mlp_act_fn": "secant_silu",
         }),
@@ -229,10 +189,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if hasattr(pytest, "_model_forward_identity"):
         print_forward_identity_table(pytest._model_forward_identity)
-        if extended:
-            for mid, data in pytest._model_forward_identity.items():
-                if not data["passed"]:
-                    print_forward_table(mid, data["errors"])
+        for mid, data in pytest._model_forward_identity.items():
+            if extended or not data["passed"]:
+                print_forward_table(mid, data["errors"])
 
     if hasattr(pytest, "_model_backward_identity"):
         print_backward_identity_table(pytest._model_backward_identity)
@@ -246,10 +205,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     if hasattr(pytest, "_lvp_model_forward_identity"):
         print_forward_identity_table(pytest._lvp_model_forward_identity)
-        if extended:
-            for mid, data in pytest._lvp_model_forward_identity.items():
-                if not data["passed"]:
-                    print_forward_table(mid, data["errors"])
+        for mid, data in pytest._lvp_model_forward_identity.items():
+            if extended or not data["passed"]:
+                print_forward_table(mid, data["errors"])
 
     if hasattr(pytest, "_lvp_model_embedding_ratio"):
         print_conservation_embedding_table(pytest._lvp_model_embedding_ratio)

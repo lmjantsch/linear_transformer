@@ -3,11 +3,6 @@ from __future__ import annotations
 import gc
 import pytest
 import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
-
-from linear_transformer import patch_model_for_lvp
-from linear_transformer.modules import dtd_softmax, secant_softmax, constant_softmax, pos_ratio_softmax, integrated_softmax, sec_jac_softmax
 
 PROMPTS = [
     "Paris is the capital of",
