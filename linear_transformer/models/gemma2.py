@@ -114,7 +114,8 @@ class LinearGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
-                 attn_act_fn: callable, matmul_fn: callable, attn_softcap_fn: callable, **kwargs):
+                 attn_act_fn: callable, matmul_fn: callable, attn_softcap_fn: callable,
+                 ignore_softcap: bool = False, **kwargs):
         super().__init__()
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
         self.config = config
@@ -129,7 +130,10 @@ class LinearGemma2Attention(nn.Module):
         self.k_proj = k_proj
         self.v_proj = v_proj
         self.o_proj = o_proj
-        self.attn_logit_softcapping = self.config.attn_logit_softcapping
+        # ignore_softcap=True removes attn-logit softcap from forward entirely
+        # (matches DPEA "ignore softcap" semantics — cleaner than IdentityTanh which
+        # only stops the (1-tanh²) backward factor while keeping forward = tanh).
+        self.attn_logit_softcapping = None if ignore_softcap else self.config.attn_logit_softcapping
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
         self.attn_act_fn = attn_act_fn
@@ -148,6 +152,7 @@ class LinearGemma2Attention(nn.Module):
             attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
             attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'tanh')],
+            ignore_softcap=kwargs.get('ignore_softcap', False),
         )
 
     def forward(

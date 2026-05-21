@@ -132,7 +132,7 @@ class SecantReLU(torch.autograd.Function):
         return (grad_t.float() * c).to(ctx._orig_dtype), None
 
 class SecantTanh(torch.autograd.Function):
-    
+
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
@@ -156,9 +156,80 @@ class SecantTanh(torch.autograd.Function):
         return (grad_t.float() * c).to(ctx._orig_dtype)
 
 
+class IdentityTanh(torch.autograd.Function):
+    """Forward = tanh, backward = identity (skips the (1 - tanh^2) factor).
+
+    Used to disable softcap gradient distortion (Gemma-2 attn_logit_softcapping
+    and final_logit_softcapping). Matches legacy default's `eap_compat=False`
+    behavior where the softcap derivative is dropped entirely.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.tanh(x)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,
+    ) -> torch.Tensor:
+        return grad_t
+
+
+def identity_tanh(x: torch.Tensor) -> torch.Tensor:
+    return IdentityTanh.apply(x)
+
+
 # ---------------------------------------------------------------------------
 # Rule 3 — Non-zero baseline nonlinearity (Softmax DTD)
 # ---------------------------------------------------------------------------
+
+
+class DiagSoftmax(torch.autograd.Function):
+    """Diagonal-only softmax backward: drops the s·sᵀ redistribution.
+
+    Standard VJP of softmax:
+        ∂L/∂x = s ⊙ (grad − s·grad)            (full Jacobian Jᵀ g)
+                ─────────────  ──────────────
+                  diagonal     redistribution
+                                (= self-repair)
+
+    DiagSoftmax instead returns just `s ⊙ grad` — i.e. zeroes the
+    redistribution term. This blocks the softmax-level "self-repair"
+    where probability mass shifted off one position would flow into
+    others. Forward is identical to the standard softmax.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        dim: int = -1,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        orig_dtype = x.dtype
+        s = torch.softmax(x, dim=dim, dtype=dtype)
+        ctx.save_for_backward(s.to(orig_dtype))
+        ctx._orig_dtype = orig_dtype
+        ctx._dtype = dtype
+        return s.to(orig_dtype)
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None]:
+        (s,) = ctx.saved_tensors
+        dtype = ctx._dtype
+        result = s.to(dtype) * grad_t.to(dtype)
+        return result.to(ctx._orig_dtype), None, None
+
+
+def diag_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    return DiagSoftmax.apply(x, dim, dtype)
 
 class DTDSoftmax(torch.autograd.Function):
     @staticmethod
@@ -502,7 +573,9 @@ ACT_FN = {
     'silu':           F.silu,
     'relu':           F.relu,
     'tanh':           torch.tanh,
+    'identity_tanh':  identity_tanh,
     'softmax':        F.softmax,
+    'diag_softmax':   diag_softmax,
     # Rule 2 — zero-preserving (LVP secant)
     'secant_gelu':      secant_gelu,
     'secant_gelu_tanh': secant_gelu_tanh,
