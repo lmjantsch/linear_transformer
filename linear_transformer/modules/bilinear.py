@@ -37,8 +37,8 @@ class BilinearMatmul(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         x: torch.Tensor,  # (..., d)
         y: torch.Tensor,  # (..., d)
-        x_weight: float,
-        y_weight: float
+        x_weight: float = 0.5,
+        y_weight: float = 0.5
     ) -> torch.Tensor:  # (..., d)
         orig_dtype = x.dtype
         ctx.save_for_backward(x, y)
