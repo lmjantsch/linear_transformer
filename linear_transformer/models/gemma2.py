@@ -109,8 +109,10 @@ def eager_attention_forward(
     attn_weights = module.matmul_fn(query, key_states.transpose(2, 3)) * scaling
 
     # TODO Do I have to take care of this seperately? Bypass gradient
-    # if softcap is not None:
-    #     attn_weights = SoftcapFN.apply(attn_weights, softcap)
+    if softcap is not None:
+        attn_weights = attn_weights / softcap
+        attn_weights = torch.tanh(attn_weights)
+        attn_weights = attn_weights * softcap
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
