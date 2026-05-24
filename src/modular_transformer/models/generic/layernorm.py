@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-
 class ModularLayerNorm(nn.Module):
 
     def __init__(
@@ -40,7 +39,8 @@ def layernorm(module: ModularLayerNorm, x: torch.Tensor) -> torch.Tensor:
     dims = tuple(range(-len(module.normalized_shape), 0))
     mean = x_f.mean(dim=dims, keepdim=True)
     var = x_f.var(dim=dims, keepdim=True, unbiased=False)
-    out = (x_f - mean) / (var + module.eps).sqrt() * module.weight.float()
+    out = (x_f - mean) / (var + module.eps).sqrt()
+    out = out *module.weight.float()
     if module.bias is not None:
         out = out + module.bias.float()
     return out.to(x.dtype)
@@ -51,7 +51,8 @@ def frozen_layernorm(module: ModularLayerNorm, x: torch.Tensor) -> torch.Tensor:
     dims = tuple(range(-len(module.normalized_shape), 0))
     mean = x_f.mean(dim=dims, keepdim=True).detach()
     var = x_f.var(dim=dims, keepdim=True, unbiased=False).detach()
-    out = (x_f - mean) / (var + module.eps).sqrt() * module.weight.float()
+    out = (x_f - mean) / (var + module.eps).sqrt() 
+    out = out * module.weight.float()
     if module.bias is not None:
         out = out + module.bias.float()
     return out.to(x.dtype)

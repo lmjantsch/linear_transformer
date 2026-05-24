@@ -7,16 +7,6 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _secant_denom(x: torch.Tensor, eps: float) -> torch.Tensor:
-    """Stabilised denominator for Rule 2: x + eps * sign(x), clamped so sign never flips."""
-    return x + eps * x.sign().clamp(min=1)
-    
-
-
-# ---------------------------------------------------------------------------
 # Rule 2 variants — zero-preserving nonlinearities
 # ---------------------------------------------------------------------------
 

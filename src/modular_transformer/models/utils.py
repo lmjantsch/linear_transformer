@@ -30,6 +30,7 @@ class ArchAccessors:
     pos_emb: ModelCallable = lambda model: None           # (model) -> position embeding module
     rotary_emb: ModelCallable = lambda model: None    # (model) -> rotary embeding module
     layers: ModelCallable                                                            # (model) -> layer list
+    ln: ModelCallable                                                           # (model) -> lm_head module
     lm_head: ModelCallable                                                           # (model) -> lm_head module
 
     # layer modules
@@ -136,3 +137,7 @@ def split_c_attn(
         return lin
 
     return make_linear(W_q, b_q), make_linear(W_k, b_k), make_linear(W_v, b_v)
+
+
+def identity_anchor(hidden_state: torch.Tensor) -> torch.Tensor:
+    return hidden_state

@@ -14,6 +14,7 @@ LLAMA2_ARC = ArchAccessors(
     embed=lambda model: model.model.embed_tokens,
     rotary_emb=lambda model: model.model.rotary_emb,
     layers=lambda model: model.model.layers,
+    ln=lambda model: model.model.norm,
     lm_head=lambda model: model.lm_head,
 
     pre_ln1=lambda layer: layer.input_layernorm,
@@ -25,7 +26,7 @@ LLAMA2_ARC = ArchAccessors(
     k_proj=lambda layer: layer.self_attn.k_proj,
     v_proj=lambda layer: layer.self_attn.v_proj,
     o_proj=lambda layer: layer.self_attn.o_proj,
-    attention_interface=lambda layer: layer.self_attn.source.attention_interface_0,
+    attention_interface=lambda layer: layer.self_attn.source.self_attention_interface_0,
 
     up_proj=lambda layer: layer.mlp.up_proj,
     gate_proj=lambda layer: layer.mlp.gate_proj,

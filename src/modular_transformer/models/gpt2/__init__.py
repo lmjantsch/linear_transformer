@@ -12,6 +12,7 @@ GPT2_ARC = ArchAccessors(
     embed=lambda model: model.transformer.wte,
     pos_emb=lambda model: model.transformer.wpe,
     layers=lambda model: model.transformer.h,
+    ln=lambda model: model.transformer.ln_f,
     lm_head=lambda model: model.lm_head,
 
     pre_ln1=lambda layer: layer.ln_1,
@@ -22,8 +23,8 @@ GPT2_ARC = ArchAccessors(
     q_proj=lambda layer: layer.attn.q_proj,
     k_proj=lambda layer: layer.attn.k_proj,
     v_proj=lambda layer: layer.attn.v_proj,
-    o_proj=lambda layer: layer.attn.out_proj,
-    attention_interface=lambda layer: layer.attn.source.attention_interface_0,
+    o_proj=lambda layer: layer.attn.o_proj,
+    attention_interface=lambda layer: layer.attn.source.self_attention_interface_0,
 
     up_proj=lambda layer: layer.mlp.up_proj,
     down_proj=lambda layer: layer.mlp.down_proj,
