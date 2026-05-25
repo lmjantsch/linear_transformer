@@ -12,8 +12,6 @@ from transformers.models.gemma2.configuration_gemma2 import Gemma2Config
 from transformers.models.gemma2.modeling_gemma2 import repeat_kv, apply_rotary_pos_emb
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import dtd_softmax, secant_tanh, SoftcapFN
-from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 from linear_transformer.models.utils import baseline_hidden_hook
 
 class LinearGemma2RMSNorm(nn.Module):
@@ -84,9 +82,11 @@ class LinearGemma2GeGLU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, N, d_model)
         # original (replaced * with 'mul_fn)
-        down_proj = self.down_proj(
-            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x))
-        )
+        gate_proj = self.gate_proj(x)
+        up_proj = self.up_proj(x)
+        gate_act = self.act_fn(gate_proj)
+        z = self.mul_fn(gate_act, up_proj)
+        down_proj = self.down_proj(z)
         return down_proj
 
 def eager_attention_forward(
@@ -128,7 +128,7 @@ class LinearGemma2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,
-                 attn_act_fn: callable, matmul_fn: callable, attn_softcap_fn: callable, **kwargs):
+                 attn_act_fn: callable, matmul_fn: callable, **kwargs):
         super().__init__()
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
         self.config = config
@@ -148,7 +148,6 @@ class LinearGemma2Attention(nn.Module):
 
         self.attn_act_fn = attn_act_fn
         self.matmul_fn = matmul_fn
-        self.attn_softcap_fn = attn_softcap_fn
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs: dict | None) -> LinearGemma2Attention:
@@ -161,7 +160,6 @@ class LinearGemma2Attention(nn.Module):
             o_proj=m.o_proj,
             attn_act_fn=ACT_FN[kwargs.get('attn_act_fn', 'softmax')],
             matmul_fn=BILINEAR_FN[kwargs.get('matmul_fn', 'matmul')],
-            attn_softcap_fn=ACT_FN[kwargs.get('attn_softcap_fn', 'tanh')],
         )
 
     def forward(

@@ -13,8 +13,6 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import repeat_kv, apply_rotary_pos_emb
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import secant_silu, dtd_softmax
-from linear_transformer.modules.bilinear import bilinear_mul, bilinear_matmul
 from linear_transformer.models.utils import baseline_hidden_hook
 
 
@@ -88,9 +86,11 @@ class FrozenLlama2SwiGLU(nn.Module):
         )
 
     def forward(self, x):
-        down_proj = self.down_proj(
-            self.mul_fn(self.act_fn(self.gate_proj(x)), self.up_proj(x)) # self.mul_fn instead of '*'
-        )
+        gate_proj = self.gate_proj(x)
+        up_proj = self.up_proj(x)
+        gate_act = self.act_fn(gate_proj)
+        z = self.mul_fn(gate_act, up_proj)
+        down_proj = self.down_proj(z)
         return down_proj
     
 def eager_attention_forward(

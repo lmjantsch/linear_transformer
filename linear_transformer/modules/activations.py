@@ -7,71 +7,42 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Integration helpers
 # ---------------------------------------------------------------------------
 
-def _secant_denom(x: torch.Tensor, eps: float) -> torch.Tensor:
-    """Stabilised denominator for Rule 2: x + eps * sign(x), clamped so sign never flips."""
-    return x + eps * x.sign().clamp(min=1)
-
-# ---------------------------------------------------------------------------
-# Others
-# ---------------------------------------------------------------------------
+_INTEGRATION_STEPS = 5
 
 
-class SoftcapFN(torch.autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
-        softcap: float
-    ) -> torch.Tensor:
-        x = x / softcap
-        x = torch.tanh(x)
-        x = x * softcap
-        return x
+def fwd_context_hook() -> dict:
+    return {}
 
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., N)
-    ) -> tuple[torch.Tensor, None]:
 
-        return grad_t, None
-    
+def _get_slerp(v: torch.Tensor, v_alt: torch.Tensor, alpha: float, theta: torch.Tensor) -> torch.Tensor:
+    """Slerp at parameter alpha (0→v, 1→v_alt); falls back to lerp when theta < 1e-5."""
+    near_zero = theta.abs() < 1e-5
+    safe_sin = torch.sin(theta).abs().clamp(min=1e-8)
+    coeff_v   = torch.where(near_zero, torch.full_like(theta, 1.0 - alpha), torch.sin((1.0 - alpha) * theta) / safe_sin)
+    coeff_alt = torch.where(near_zero, torch.full_like(theta, alpha),       torch.sin(alpha * theta) / safe_sin)
+    return coeff_v * v + coeff_alt * v_alt
+
+
+def _silu_deriv(x: torch.Tensor) -> torch.Tensor:
+    """d/dx [x·σ(x)] = σ(x)·(1 + x·(1 − σ(x)))"""
+    s = torch.sigmoid(x)
+    return s * (1.0 + x * (1.0 - s))
+
+
+def _gelu_tanh_deriv(x: torch.Tensor) -> torch.Tensor:
+    """Derivative of GELU (tanh approximation)."""
+    K, C = math.sqrt(2.0 / math.pi), 0.044715
+    inner = K * (x + C * x.pow(3))
+    t = torch.tanh(inner)
+    return 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t.pow(2)) * (K * (1.0 + 3.0 * C * x.pow(2)))
 
 
 # ---------------------------------------------------------------------------
 # Rule 2 variants — zero-preserving nonlinearities
 # ---------------------------------------------------------------------------
-
-class SecantGELU(torch.autograd.Function):
-    """Rule 2 — GELU (erf formulation).
-
-    Secant: c = Φ(x) = 0.5 * (1 + erf(x / √2))
-    Forward:  f(x_i) = x_i * c
-    Backward: f⁻¹(t) = t * c
-    """
-
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., d)
-    ) -> torch.Tensor:  # (..., d)
-        orig_dtype = x.dtype
-        ctx.save_for_backward(x)
-        ctx._orig_dtype = orig_dtype
-        return F.gelu(x.float()).to(orig_dtype)
-
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., d)
-    ) -> torch.Tensor:  # (..., d)
-        (x,) = ctx.saved_tensors
-        c = 0.5 * (1.0 + torch.erf(x.float() / math.sqrt(2.0)))  # Gaussian CDF
-        return (grad_t.float() * c).to(ctx._orig_dtype)
-
 
 class SecantGELUTanh(torch.autograd.Function):
     """Rule 2 — GELU (tanh approximation, used in Gemma2).
@@ -129,145 +100,123 @@ class SecantSiLU(torch.autograd.Function):
         return (grad_t.float() * c).to(ctx._orig_dtype)
 
 
-class SecantReLU(torch.autograd.Function):
-    """Rule 2 — ReLU.
+# ---------------------------------------------------------------------------
+# Lerp / Slerp SiLU  (5-step IG)
+# ---------------------------------------------------------------------------
 
-    Secant: c = relu(x) / (x + eps·sign(x).clamp(min=1))
-    """
+class IntegratedLerpSiLU(torch.autograd.Function):
 
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., d)
-        eps: float = 1e-6,
-    ) -> torch.Tensor:  # (..., d)
-        orig_dtype = x.dtype
-        ctx.save_for_backward(x)
-        ctx._orig_dtype = orig_dtype
-        ctx._eps = eps
-        return F.relu(x.float()).to(orig_dtype)
-
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., d)
-    ) -> tuple[torch.Tensor, None]:
-        (x,) = ctx.saved_tensors
-        x_f = x.float()
-        c = F.relu(x_f) / _secant_denom(x_f, ctx._eps)
-        return (grad_t.float() * c).to(ctx._orig_dtype), None
-
-class SecantTanh(torch.autograd.Function):
-    
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., d)
-    ) -> torch.Tensor:  # (..., d)
-        orig_dtype = x.dtype
-        ctx.save_for_backward(x)
-        ctx._orig_dtype = orig_dtype
-        return torch.tanh(x.float()).to(orig_dtype)
+        x: torch.Tensor,
+        x_base: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(x, x_base)
+        ctx._orig_dtype = x.dtype
+        return F.silu(x.float()).to(x.dtype)
 
     @staticmethod
     def backward(
         ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., d)
-    ) -> torch.Tensor:  # (..., d)
-        (x,) = ctx.saved_tensors
-        x_f = x.float()
-        c = torch.ones_like(x_f)
-        mask = torch.abs(x_f) > 1e-6
-        c[mask] = torch.tanh(x_f[mask]) / x_f[mask]
-        return (grad_t.float() * c).to(ctx._orig_dtype)
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        x, x_base = ctx.saved_tensors
+        x_f, base_f = x.float(), x_base.float()
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        for i in range(1, k + 1):
+            acc += _silu_deriv(base_f + (i / k) * (x_f - base_f))
+        return (grad_t.float() * acc / k).to(ctx._orig_dtype), None
+
+
+class IntegratedSlerpSiLU(torch.autograd.Function):
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        x_base: torch.Tensor,
+        theta: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(x, x_base, theta)
+        ctx._orig_dtype = x.dtype
+        return F.silu(x.float()).to(x.dtype)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None]:
+        x, x_base, theta = ctx.saved_tensors
+        x_f, base_f, th_f = x.float(), x_base.float(), theta.float()
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        for i in range(1, k + 1):
+            acc += _silu_deriv(_get_slerp(base_f, x_f, i / k, th_f))
+        return (grad_t.float() * acc / k).to(ctx._orig_dtype), None, None
+
+
+# ---------------------------------------------------------------------------
+# Lerp / Slerp GELUTanh  (5-step IG)
+# ---------------------------------------------------------------------------
+
+class IntegratedLerpGELUTanh(torch.autograd.Function):
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        x_base: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(x, x_base)
+        ctx._orig_dtype = x.dtype
+        return F.gelu(x.float(), approximate="tanh").to(x.dtype)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        x, x_base = ctx.saved_tensors
+        x_f, base_f = x.float(), x_base.float()
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        for i in range(1, k + 1):
+            acc += _gelu_tanh_deriv(base_f + (i / k) * (x_f - base_f))
+        return (grad_t.float() * acc / k).to(ctx._orig_dtype), None
+
+
+class IntegratedSlerpGELUTanh(torch.autograd.Function):
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        x_base: torch.Tensor,
+        theta: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(x, x_base, theta)
+        ctx._orig_dtype = x.dtype
+        return F.gelu(x.float(), approximate="tanh").to(x.dtype)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None]:
+        x, x_base, theta = ctx.saved_tensors
+        x_f, base_f, th_f = x.float(), x_base.float(), theta.float()
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        for i in range(1, k + 1):
+            acc += _gelu_tanh_deriv(_get_slerp(base_f, x_f, i / k, th_f))
+        return (grad_t.float() * acc / k).to(ctx._orig_dtype), None, None
 
 
 # ---------------------------------------------------------------------------
 # Rule 3 — Non-zero baseline nonlinearity (Softmax DTD)
 # ---------------------------------------------------------------------------
-
-class DTDSoftmax(torch.autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
-        dim: int = -1,
-        dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:  # (..., N)
-        orig_dtype = x.dtype
-        s = torch.softmax(x, dim=dim, dtype=dtype)
-        ctx.save_for_backward(s.to(orig_dtype))
-        ctx._orig_dtype = orig_dtype
-        ctx._dim = dim
-        ctx._dtype = dtype
-        return s.to(orig_dtype)
-
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., N)
-    ) -> tuple[torch.Tensor, None, None]:
-        (s,) = ctx.saved_tensors
-        dim = ctx._dim
-        dtype = ctx._dtype
-        s_f = s.to(dtype=dtype)
-        # f⁻¹(t) = t - s · (Σ_j t_j)
-        result = grad_t.to(dtype=dtype) - s_f * grad_t.to(dtype=dtype).sum(dim=dim, keepdim=True)
-        return result.to(ctx._orig_dtype), None, None  # no gradient w.r.t. dim
-
-class SecantSoftmax(torch.autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
-        dim: int = -1,
-        dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:  # (..., N)
-        orig_dtype = x.dtype
-        s = torch.softmax(x, dim=dim, dtype=dtype)
-        ctx.save_for_backward(s.to(orig_dtype), x)
-        ctx._orig_dtype = orig_dtype
-        ctx._dtype = dtype
-        return s.to(orig_dtype)
-
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., N)
-    ) -> tuple[torch.Tensor, None, None]:
-        (s, x) = ctx.saved_tensors
-        dtype = ctx._dtype
-        s_f = s.to(dtype=dtype)
-        x_f = x.to(dtype=dtype)
-        result = s_f / (x_f + 1e-07) * grad_t.to(dtype=dtype).sum(-1, keepdim=True)
-        return result.to(ctx._orig_dtype), None, None 
-    
-class PosRationSoftmax(torch.autograd.Function):
-    @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
-        dim: int = -1,
-        dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:  # (..., N)
-        orig_dtype = x.dtype
-        s = torch.softmax(x, dim=dim, dtype=dtype)
-        ctx.save_for_backward(x)
-        ctx._orig_dtype = orig_dtype
-        ctx._dim = dim
-        ctx._dtype = dtype
-        return s.to(orig_dtype)
-
-    @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., N)
-    ) -> tuple[torch.Tensor, None, None]:
-        (x, ) = ctx.saved_tensors
-        dtype = ctx._dtype
-        x_f = x.to(dtype=dtype).clip(min=0.0)
-        result = x_f / (x_f.sum(dim=-1, keepdim=True) + 1e-7) * grad_t.to(dtype=dtype)
-        return result.to(ctx._orig_dtype), None, None  # no gradient w.r.t. dim
 
 class IntegratedSoftmax(torch.autograd.Function):
     @staticmethod
@@ -279,12 +228,12 @@ class IntegratedSoftmax(torch.autograd.Function):
     ) -> torch.Tensor:
         orig_dtype = x.dtype
         s = torch.softmax(x, dim=dim, dtype=dtype)
-        
+
         ctx.save_for_backward(x)
         ctx._orig_dtype = orig_dtype
         ctx._dim = dim
         ctx._dtype = dtype
-        
+
         return s.to(orig_dtype)
 
     @staticmethod
@@ -297,27 +246,26 @@ class IntegratedSoftmax(torch.autograd.Function):
         dim = ctx._dim
 
         k_steps = 10
-        
+
         grad_t_f = grad_t.to(dtype=dtype)
         accumulated_grads = torch.zeros_like(x, dtype=dtype)
-        
+
         # Generate alphas: [1/k, 2/k, ..., 1.0]
         alphas = torch.linspace(1.0 / k_steps, 1.0, steps=k_steps, device=x.device, dtype=dtype)
         baseline = torch.zeros_like(x, dtype=x.dtype, device=x.device)
         for alpha in alphas:
             x_alpha = baseline + alpha * (x - baseline)
             s_alpha = torch.softmax(x_alpha, dim=dim, dtype=dtype)
-            
+
             dot_product = (grad_t_f * s_alpha).sum(dim=dim, keepdim=True)
             step_grad = s_alpha * (grad_t_f - dot_product)
             accumulated_grads += step_grad
-            
+
         # Average the accumulated gradients
         result = accumulated_grads / k_steps
 
         return result.to(ctx._orig_dtype), None, None
 
-import torch
 
 class SecantJacobianSoftmax(torch.autograd.Function):
     @staticmethod
@@ -330,7 +278,7 @@ class SecantJacobianSoftmax(torch.autograd.Function):
         orig_dtype = x.dtype
         s = torch.softmax(x, dim=dim, dtype=dtype)
         # We only need the raw inputs for the analytical backward pass!
-        ctx.save_for_backward(x.to(dtype)) 
+        ctx.save_for_backward(x.to(dtype))
         ctx._orig_dtype = orig_dtype
         ctx._dim = dim
         ctx._dtype = dtype
@@ -344,177 +292,195 @@ class SecantJacobianSoftmax(torch.autograd.Function):
         (x_f,) = ctx.saved_tensors
         dim = ctx._dim
         dtype = ctx._dtype
-        
+
         grad_f = grad_t.to(dtype=dtype)
         N = x_f.shape[dim]
-        
+
         # If sequence length / vocab size is 1, the gradient is always 0
         if N <= 1:
             return torch.zeros_like(grad_t), None, None
 
         # --- Analytical Secant Factor Calculation ---
         # f(x) = (exp(x) - 1) / (x * (N - 1 + exp(x)))
-        
+
         # 1. Taylor Expansion for |x| near 0 (Prevents 0/0 NaN)
         # f(x) ≈ 1/N + (N-2)/(2N^2) * x
         eps = 1e-3 if dtype in (torch.float16, torch.bfloat16) else 1e-4
         taylor_approx = 1.0 / N + ((N - 2.0) / (2.0 * N * N)) * x_f
-        
+
         # 2. Stable formula for x > 0 (Prevents exp(x) inf overflow)
         exp_neg_x = torch.exp(-x_f)
         factor_pos = (1.0 - exp_neg_x) / (x_f * ((N - 1) * exp_neg_x + 1.0))
-        
+
         # 3. Stable formula for x < 0 (Prevents underflow issues)
         exp_x = torch.exp(x_f)
         factor_neg = (exp_x - 1.0) / (x_f * (N - 1 + exp_x))
-        
+
         # Combine domains seamlessly
         factor = torch.where(x_f > 0, factor_pos, factor_neg)
         factor = torch.where(torch.abs(x_f) < eps, taylor_approx, factor)
-        
+
         # --- Vector-Jacobian Product ---
         G_sum = grad_f.sum(dim=dim, keepdim=True)
         result = factor * (grad_f - G_sum / N)
-        
+
         return result.to(ctx._orig_dtype), None, None
 
 
-class FrozenDenomSoftmax(torch.autograd.Function):
+# ---------------------------------------------------------------------------
+# Lerp / Slerp Softmax  (5-step IG)
+# ---------------------------------------------------------------------------
+
+class IntegratedLerpSoftmax(torch.autograd.Function):
+
     @staticmethod
-    def forward(  # type: ignore[override]
+    def forward(
         ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
+        x: torch.Tensor,
+        x_base: torch.Tensor,
         dim: int = -1,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x_f = x.float()
-        x_max = x_f.max(dim=dim, keepdim=True).values
-        exps = torch.exp(x_f - x_max)
-        sum_exps = torch.sum(exps, dim=dim, keepdim=True)
-    
-        s = exps / sum_exps
-        
-        ctx.save_for_backward(sum_exps)
-        ctx._orig_dtype = orig_dtype
+        ctx.save_for_backward(x, x_base)
+        ctx._orig_dtype = x.dtype
+        ctx._dim = dim
         ctx._dtype = dtype
-        
-        return s.to(orig_dtype)
+        return torch.softmax(x, dim=dim, dtype=dtype).to(x.dtype)
 
     @staticmethod
-    def backward(  # type: ignore[override]
+    def backward(
         ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # (..., N)
-    ) -> tuple[torch.Tensor, None, None]:
-        (sum_exps,) = ctx.saved_tensors
-        dtype = ctx._dtype
-        
-        grad_t_f = grad_t.to(dtype)
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None]:
+        x, x_base = ctx.saved_tensors
+        dtype, dim = ctx._dtype, ctx._dim
+        x_f, base_f = x.to(dtype), x_base.to(dtype)
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        g = grad_t.to(dtype)
+        for i in range(1, k + 1):
+            s = torch.softmax(base_f + (i / k) * (x_f - base_f), dim=dim, dtype=dtype)
+            acc += s * (g - (g * s).sum(dim=dim, keepdim=True))
+        return (acc / k).to(ctx._orig_dtype), None, None, None
 
-        result = torch.log(grad_t_f.clip(min=1e-7) * sum_exps)
 
-        return result.to(ctx._orig_dtype), None, None
+class IntegratedSlerpSoftmax(torch.autograd.Function):
 
-class OuterProdSoftmax(torch.autograd.Function):
     @staticmethod
-    def forward(  # type: ignore[override]
+    def forward(
         ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,  # (..., N)
+        x: torch.Tensor,
+        x_base: torch.Tensor,
+        theta: torch.Tensor,
         dim: int = -1,
-        dtype: torch.dtype = torch.float32
+        dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x_f = x.to(dtype) # Safer to use .to() instead of .float() if dtype arg is passed
-        
-        # Standard stable Softmax
-        x_max = x_f.max(dim=dim, keepdim=True).values
-        exps = torch.exp(x_f - x_max)
-        sum_exps = torch.sum(exps, dim=dim, keepdim=True)
-        s = exps / sum_exps
-        
-        # Save tensors and attributes needed for backward
-        ctx.save_for_backward(x, s.to(orig_dtype))
-        ctx._orig_dtype = orig_dtype
+        ctx.save_for_backward(x, x_base, theta)
+        ctx._orig_dtype = x.dtype
+        ctx._dim = dim
         ctx._dtype = dtype
-        ctx._dim = dim  # Save the dimension!
-        
-        return s.to(orig_dtype)
+        return torch.softmax(x, dim=dim, dtype=dtype).to(x.dtype)
 
     @staticmethod
-    def backward(  # type: ignore[override]
+    def backward(
         ctx: torch.autograd.function.FunctionCtx,
-        grad_t: torch.Tensor,  # The incoming vector t from the next layer
-    ) -> tuple[torch.Tensor, None, None, None]: 
-        # Note: Return a None for every input argument in forward (x, dim, dtype)
-        
-        (x, s) = ctx.saved_tensors
-        dim = ctx._dim
-        dtype = ctx._dtype
-        
-        x_f = x.to(dtype)
-        s_f = s.to(dtype)
-        grad_t_f = grad_t.to(dtype)
+        grad_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None, None, None]:
+        x, x_base, theta = ctx.saved_tensors
+        dtype, dim = ctx._dtype, ctx._dim
+        x_f, base_f, th_f = x.to(dtype), x_base.to(dtype), theta.float()
+        k = _INTEGRATION_STEPS
+        acc = torch.zeros_like(x_f)
+        g = grad_t.to(dtype)
+        for i in range(1, k + 1):
+            x_alpha = _get_slerp(base_f, x_f, i / k, th_f).to(dtype)
+            s = torch.softmax(x_alpha, dim=dim, dtype=dtype)
+            acc += s * (g - (g * s).sum(dim=dim, keepdim=True))
+        return (acc / k).to(ctx._orig_dtype), None, None, None, None
 
-        s_dot_t = torch.sum(s_f * grad_t_f, dim=dim, keepdim=True)
-        
-        norm_sq = torch.sum(x_f * x_f, dim=dim, keepdim=True)
-        norm_sq = torch.clamp(norm_sq, min=1e-12)
-        
-        result = (s_dot_t / norm_sq) * x_f
-
-        return result.to(ctx._orig_dtype), None, None
 
 # ---------------------------------------------------------------------------
 # Functional wrappers
 # ---------------------------------------------------------------------------
 
-def secant_gelu(x: torch.Tensor) -> torch.Tensor:
-    return SecantGELU.apply(x)
+
+def gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
+    return F.gelu(x, approximate='tanh')
+
+
+def silu(x: torch.Tensor) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
+    return F.silu(x)
+
+
+def softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
+    return F.softmax(x, dim=dim, dtype=dtype)
 
 
 def secant_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
     return SecantGELUTanh.apply(x)
 
 
 def secant_silu(x: torch.Tensor) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
     return SecantSiLU.apply(x)
 
 
-def secant_relu(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return SecantReLU.apply(x, eps)
-
-
-def secant_tanh(x: torch.Tensor) -> torch.Tensor:
-    return SecantTanh.apply(x)
-
-
-def dtd_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return DTDSoftmax.apply(x, dim, dtype)
-
-
-def secant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return SecantSoftmax.apply(x, dim, dtype)
-
-
-def pos_ratio_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return PosRationSoftmax.apply(x, dim, dtype)
-
-
 def integrated_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
     return IntegratedSoftmax.apply(x, dim, dtype)
 
 
 def sec_jac_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    fwd_context = fwd_context_hook()
     return SecantJacobianSoftmax.apply(x, dim, dtype)
 
-def frozen_denom_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return FrozenDenomSoftmax.apply(x, dim, dtype)
 
-def outer_prod_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return OuterProdSoftmax.apply(x, dim, dtype)
+def lerp_silu(x: torch.Tensor) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedLerpSiLU.apply(x, ctx.get("x_base", torch.zeros_like(x)))
 
-def constant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    return F.softmax(x, dim=dim, dtype=dtype).detach()
+
+def slerp_silu(x: torch.Tensor) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedSlerpSiLU.apply(
+        x,
+        ctx.get("x_base", torch.zeros_like(x)),
+        ctx.get("theta", torch.full_like(x, 2 * math.pi / 3)),
+    )
+
+
+def lerp_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedLerpGELUTanh.apply(x, ctx.get("x_base", torch.zeros_like(x)))
+
+
+def slerp_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedSlerpGELUTanh.apply(
+        x,
+        ctx.get("x_base", torch.zeros_like(x)),
+        ctx.get("theta", torch.full_like(x, 2 * math.pi / 3)),
+    )
+
+
+def lerp_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedLerpSoftmax.apply(x, ctx.get("x_base", torch.zeros_like(x)), dim, dtype)
+
+
+def slerp_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    ctx = fwd_context_hook()
+    return IntegratedSlerpSoftmax.apply(
+        x,
+        ctx.get("x_base", torch.zeros_like(x)),
+        ctx.get("theta", torch.full_like(x, 2 * math.pi / 3)),
+        dim,
+        dtype,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -523,25 +489,21 @@ def constant_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.
 
 ACT_FN = {
     # Standard activations
-    'gelu':           F.gelu,
-    'gelu_tanh':      lambda x: F.gelu(x, approximate='tanh'),
-    'silu':           F.silu,
-    'relu':           F.relu,
-    'tanh':           torch.tanh,
-    'softmax':        F.softmax,
+    'gelu_tanh': gelu_tanh,
+    'silu':      silu,
+    'softmax':   softmax,
     # Rule 2 — zero-preserving (LVP secant)
-    'secant_gelu':      secant_gelu,
     'secant_gelu_tanh': secant_gelu_tanh,
     'secant_silu':      secant_silu,
-    'secant_relu':      secant_relu,
-    'secant_tanh':      secant_tanh,
     # Rule 3 — softmax variants (LVP)
-    'dtd_softmax':        dtd_softmax,
     'sec_jac_softmax':    sec_jac_softmax,
     'integrated_softmax': integrated_softmax,
-    'secant_softmax':     secant_softmax,
-    'pos_ratio_softmax':  pos_ratio_softmax,
-    'frozen_denom_softmax': frozen_denom_softmax,
-    'outer_prod_softmax': outer_prod_softmax,
-    'constant_softmax':   constant_softmax,
+    # Lerp IG (linear path, external baseline via context hook)
+    'lerp_silu':       lerp_silu,
+    'lerp_gelu_tanh':  lerp_gelu_tanh,
+    'lerp_softmax':    lerp_softmax,
+    # Slerp IG (spherical path, external baseline + theta via context hook)
+    'slerp_silu':      slerp_silu,
+    'slerp_gelu_tanh': slerp_gelu_tanh,
+    'slerp_softmax':   slerp_softmax,
 }

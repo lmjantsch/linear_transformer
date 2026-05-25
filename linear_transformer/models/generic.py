@@ -4,7 +4,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from linear_transformer.modules.linear import linear_sub, linear_add
 from linear_transformer.models.utils import baseline_hidden_hook
 
 class CustomLayerNorm(nn.Module):

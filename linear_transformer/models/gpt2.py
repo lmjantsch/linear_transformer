@@ -8,8 +8,6 @@ from transformers.cache_utils import Cache, EncoderDecoderCache
 from transformers.utils.generic import maybe_autocast
 
 from linear_transformer.modules import ACT_FN, BILINEAR_FN
-from linear_transformer.modules.activations import secant_gelu_tanh, dtd_softmax
-from linear_transformer.modules.bilinear import bilinear_matmul
 
 class CustomGPT2MLP(nn.Module):
 
