@@ -1,8 +1,3 @@
-"""Test 4: unit tests for LVP conservation on individual module primitives.
-
-Property: for any LVP-linearized f, (f(x)·t).sum() == (x·x.grad).sum() after f(x).backward(t).
-For secant activations f(x) = x·c(x) this is exact; for DTDSoftmax it is approximate.
-"""
 from __future__ import annotations
 
 import pytest

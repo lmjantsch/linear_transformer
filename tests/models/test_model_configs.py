@@ -23,9 +23,9 @@ def test_residual_forward_identity(
     max_err = max(max(errors["mid"]), max(errors["out"]))
     passed = max_err < 1e-2
 
-    if not hasattr(pytest, "_lvp_model_forward_identity"):
-        pytest._lvp_model_forward_identity = {}
-    pytest._lvp_model_forward_identity[request.node.callspec.id] = {"errors": errors, "passed": passed}
+    if not hasattr(pytest, "_patched_model_forward_identity"):
+        pytest._patched_model_forward_identity = {}
+    pytest._patched_model_forward_identity[request.node.callspec.id] = {"errors": errors, "passed": passed}
 
     assert passed, (
         f"[{request.node.callspec.id}] max forward divergence {max_err:.2e} exceeds threshold 1e-2"
@@ -40,9 +40,9 @@ def test_next_token_kl_identity(
     """Patched model logits must match unpatched model (KL < 5e-3 per prompt)."""
     kl_values = get_kl_values_from_logits(patched_model_cache, org_model_cache)
 
-    if not hasattr(pytest, "_lvp_model_kl_identity"):
-        pytest._lvp_model_kl_identity = {}
-    pytest._lvp_model_kl_identity[request.node.callspec.id] = kl_values
+    if not hasattr(pytest, "_patched_model_kl_identity"):
+        pytest._patched_model_kl_identity = {}
+    pytest._patched_model_kl_identity[request.node.callspec.id] = kl_values
 
     max_kl = max(kl_values)
     assert max_kl < 5e-3, f"[{request.node.callspec.id}] max KL = {max_kl:.2e} exceeds threshold 5e-3"
@@ -75,9 +75,9 @@ def test_per_module_conservation(
     max_err = max(max(v) for v in errors.values())
     passed = max_err < 0.1
 
-    if not hasattr(pytest, "_lvp_model_conservation_results"):
-        pytest._lvp_model_conservation_results = {}
-    pytest._lvp_model_conservation_results[request.node.callspec.id] = {"errors": errors, "passed": passed}
+    if not hasattr(pytest, "_patched_model_conservation_results"):
+        pytest._patched_model_conservation_results = {}
+    pytest._patched_model_conservation_results[request.node.callspec.id] = {"errors": errors, "passed": passed}
 
 
 def test_total_conservation_at_embedding(
@@ -89,7 +89,7 @@ def test_total_conservation_at_embedding(
         patched_model_cache['emb'].float() * patched_model_cache['emb_grad'].float()
     ).sum().item() / patched_model_cache['loss'].item()
 
-    if not hasattr(pytest, "_lvp_model_embedding_ratio"):
-        pytest._lvp_model_embedding_ratio = {}
-    pytest._lvp_model_embedding_ratio[request.node.callspec.id] = ratio
+    if not hasattr(pytest, "_patched_model_embedding_ratio"):
+        pytest._patched_model_embedding_ratio = {}
+    pytest._patched_model_embedding_ratio[request.node.callspec.id] = ratio
 

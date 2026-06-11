@@ -43,17 +43,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--mlp_act_fn",
         default=None,
-        help="MLP activation key (e.g. secant_silu, secant_gelu_tanh). Defaults to model-specific LVP activation.",
+        help="MLP activation key (e.g. secant_silu, secant_gelu_tanh). Defaults to model-specific activation.",
     )
     parser.addoption(
         "--frozen_norm",
         default='true',
         help="Freeze normalisation factors in norms (true/false).",
-    )
-    parser.addoption(
-        "--attn_softcap_fn",
-        default='secant_tanh',
-        help="Softcap activation for Gemma2 logit softcapping (e.g. secant_tanh, tanh).",
     )
     parser.addoption(
         "--extended",
@@ -89,10 +84,6 @@ def mlp_act_fn(request: pytest.FixtureRequest) -> str | None:
 @pytest.fixture(scope="session")
 def frozen_norm(request: pytest.FixtureRequest) -> bool:
     return request.config.getoption("--frozen_norm").lower() == 'true'
-
-@pytest.fixture(scope="session")
-def attn_softcap_fn(request: pytest.FixtureRequest) -> str:
-    return request.config.getoption("--attn_softcap_fn")
 
 @pytest.fixture(scope="session")
 def extended(request: pytest.FixtureRequest) -> bool:

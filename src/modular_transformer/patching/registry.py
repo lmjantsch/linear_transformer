@@ -13,20 +13,10 @@ from modular_transformer.models.gpt2 import ModularGPT2MLP, ModularGPT2Attention
 _REGISTRY: dict[type, Callable[[nn.Module], nn.Module]] = {}
 
 
-def register_lvp_module(
+def register_module(
     hf_class: type,
     factory: Callable[[nn.Module], nn.Module],
 ) -> None:
-    """Register a custom HF module class → LVP wrapper factory.
-
-    Call this before patch_model_for_lvp() to support additional model families.
-
-    Example::
-
-        from my_model import MyAttention
-        from my_wrappers import MyLVPAttention
-        register_lvp_module(MyAttention, MyLVPAttention.from_module)
-    """
     _REGISTRY[hf_class] = factory
 
 

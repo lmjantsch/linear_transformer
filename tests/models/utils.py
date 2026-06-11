@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 from nnsight import NNsight
 
-from modular_transformer import patch_model_for_lvp
+from modular_transformer import patch_model
 
 
 @dataclass
@@ -135,7 +135,7 @@ def get_kl_values_from_logits(model_cache, baseline_cache):
 # model = AutoModelForCausalLM.from_pretrained(
 #         model_id, torch_dtype=dtype, attn_implementation='eager'
 #     ).to(device).eval()
-#     model = patch_model_for_lvp(model, **lvp_config)
+#     model = patch_model(model, **lvp_config)
 
 def detach_and_move_to_device(cache: dict, device: str | torch.device):
     if isinstance(device, str):

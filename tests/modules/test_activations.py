@@ -1,8 +1,3 @@
-"""Test 4: unit tests for LVP conservation on individual module primitives.
-
-Property: for any LVP-linearized f, (f(x)·t).sum() == (x·x.grad).sum() after f(x).backward(t).
-For secant activations f(x) = x·c(x) this is exact; for DTDSoftmax it is approximate.
-"""
 from __future__ import annotations
 
 import pytest
@@ -62,7 +57,7 @@ _SOFTMAX_VARIANTS = [
 def test_softmax_variant_forward(
     cls: type, shape: tuple[int, int, int], device: torch.device
 ) -> None:
-    """Every LVP softmax variant produces the same output as F.softmax."""
+    """Every softmax variant produces the same output as F.softmax."""
     torch.manual_seed(0)
     x = torch.randn(shape, device=device)
     expected = F.softmax(x, dim=-1, dtype=torch.float32)

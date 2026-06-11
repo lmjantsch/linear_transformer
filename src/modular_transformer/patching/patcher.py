@@ -6,7 +6,7 @@ from nnsight import NNsight
 from modular_transformer.patching.registry import get_registry
 
 
-def patch_model_for_lvp(
+def patch_model(
     model: nn.Module,
     include: set[type] | None = None,
     exclude: set[type] | None = None,
@@ -58,7 +58,7 @@ def _print_patch_plan(
     dry_run: bool,
 ) -> None:
     label = "[dry-run] Would patch" if dry_run else "Patched"
-    print(f"lvp — {label} {len(replacements)} module(s):")
+    print(f"{label} {len(replacements)} module(s):")
     for path, old_cls, new_cls in replacements:
         print(f"  {path}: {old_cls.__name__} → {new_cls.__name__}")
 
