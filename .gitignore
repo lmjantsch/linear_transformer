@@ -5,3 +5,6 @@
 .claude/
 __pycache__/
 build/
+
+# files
+test.ipynb
