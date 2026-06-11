@@ -3,7 +3,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-class ModularLayerNorm(nn.Module):
+from modular_transformer.models.base import ModularModule
+
+
+class ModularLayerNorm(ModularModule):
 
     def __init__(
         self,

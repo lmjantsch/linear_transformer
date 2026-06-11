@@ -10,9 +10,10 @@ from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotar
 
 from modular_transformer.modules import ACT_FN, BILINEAR_FN
 from modular_transformer.models.utils import expand_kv_linear
+from modular_transformer.models.base import ModularModule
 
 
-class ModularLlama2Attention(nn.Module):
+class ModularLlama2Attention(ModularModule):
 
     def __init__(
         self,

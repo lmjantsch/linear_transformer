@@ -3,7 +3,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-class ModularGemma2RMSNorm(nn.Module):
+from modular_transformer.models.base import ModularModule
+
+
+class ModularGemma2RMSNorm(ModularModule):
 
     def __init__(self, weight: nn.Parameter, eps: float, norm_fn: str | None = None) -> None:
         super().__init__()
@@ -23,8 +26,7 @@ class ModularGemma2RMSNorm(nn.Module):
     def forward(self, x):
         return self.norm_fn(self, x)
     
-
-    
+     
 def gemma2_rmsnorm(module: ModularGemma2RMSNorm, x: torch.Tensor) -> torch.Tensor:
     x_f = x.float()
 

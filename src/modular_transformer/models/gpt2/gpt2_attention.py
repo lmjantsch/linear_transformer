@@ -7,9 +7,10 @@ from transformers.cache_utils import Cache
 
 from modular_transformer.modules import ACT_FN, BILINEAR_FN
 from modular_transformer.models.utils import conv1d_to_linear, split_c_attn
+from modular_transformer.models.base import ModularModule
 
 
-class ModularGPT2Attention(nn.Module):
+class ModularGPT2Attention(ModularModule):
 
     def __init__(
         self,

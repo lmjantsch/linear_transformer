@@ -1,7 +1,7 @@
 from .gpt2_attention import ModularGPT2Attention
 from .gpt2_mlp import ModularGPT2MLP
 
-from ..utils import ArchAccessors
+from ..base import ArchAccessors
 
 GPT2_ARC = ArchAccessors(
     n_layers=lambda model: model.config.num_hidden_layers,

@@ -3,8 +3,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from modular_transformer.models.base import ModularModule
 
-class ModularLlama2RMSNorm(nn.Module):
+
+class ModularLlama2RMSNorm(ModularModule):
 
     def __init__(self, weight: nn.Parameter, variance_epsilon: float, norm_fn: callable) -> None:
         super().__init__()

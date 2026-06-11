@@ -2,7 +2,7 @@ from .llama2_attention import ModularLlama2Attention
 from .llama2_mlp import ModularLlama2MLP
 from .llama2_rmsnorm import ModularLlama2RMSNorm
 
-from ..utils import ArchAccessors
+from ..base import ArchAccessors
 
 LLAMA2_ARC = ArchAccessors(
     n_layers=lambda model: model.config.num_hidden_layers,

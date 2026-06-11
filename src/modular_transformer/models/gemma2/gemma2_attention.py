@@ -13,8 +13,10 @@ from transformers.models.gemma2.modeling_gemma2 import Gemma2Attention, repeat_k
 
 from modular_transformer.modules import ACT_FN, BILINEAR_FN
 from modular_transformer.models.utils import expand_kv_linear
+from modular_transformer.models.base import ModularModule
 
-class ModularGemma2Attention(nn.Module):
+
+class ModularGemma2Attention(ModularModule):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, config: Gemma2Config, layer_idx: int, q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear, o_proj: nn.Linear,

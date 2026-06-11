@@ -4,8 +4,10 @@ import torch
 import torch.nn as nn
 
 from modular_transformer.modules import ACT_FN, BILINEAR_FN
+from modular_transformer.models.base import ModularModule
 
-class ModularGemma2MLP(nn.Module):
+
+class ModularGemma2MLP(ModularModule):
 
     def __init__(self, gate_proj: nn.Linear, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable, mul_fn: callable) -> None:
         super().__init__()

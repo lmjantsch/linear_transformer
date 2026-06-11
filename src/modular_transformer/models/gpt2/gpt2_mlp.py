@@ -5,9 +5,10 @@ import torch.nn as nn
 
 from modular_transformer.modules import ACT_FN
 from modular_transformer.models.utils import conv1d_to_linear
+from modular_transformer.models.base import ModularModule
 
 
-class ModularGPT2MLP(nn.Module):
+class ModularGPT2MLP(ModularModule):
 
     def __init__(self, up_proj: nn.Linear, down_proj: nn.Linear, act_fn: callable) -> None:
         super().__init__()

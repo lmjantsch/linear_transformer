@@ -4,9 +4,10 @@ import torch
 import torch.nn as nn
 
 from modular_transformer.modules import ACT_FN, BILINEAR_FN
+from modular_transformer.models.base import ModularModule
 
 
-class ModularLlama2MLP(nn.Module):
+class ModularLlama2MLP(ModularModule):
 
     def __init__(
         self,
