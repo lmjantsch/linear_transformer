@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from modular_transformer.models.base import ModularModule
+from modular_transformer.modules.activations import NORM_FN
 
 
 class ModularLayerNorm(ModularModule):
@@ -25,43 +26,17 @@ class ModularLayerNorm(ModularModule):
 
     @classmethod
     def from_module(cls, m: nn.Module, **kwargs) -> ModularLayerNorm:
+        key = 'frozen_layer_norm' if kwargs.get('norm_approx') == 'frozen' else 'layer_norm'
         return cls(
             weight=m.weight,
             bias=m.bias,
             eps=m.eps,
             normalized_shape=tuple(m.normalized_shape),
-            norm_fn=NORM_FN_MAPPING[kwargs.get('norm_approx', None)],
+            norm_fn=NORM_FN[key],
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm_fn(self, x)
-
-
-def layernorm(module: ModularLayerNorm, x: torch.Tensor) -> torch.Tensor:
-    x_f = x.float()
-    dims = tuple(range(-len(module.normalized_shape), 0))
-    mean = x_f.mean(dim=dims, keepdim=True)
-    var = x_f.var(dim=dims, keepdim=True, unbiased=False)
-    out = (x_f - mean) / (var + module.eps).sqrt()
-    out = out *module.weight.float()
-    if module.bias is not None:
-        out = out + module.bias.float()
-    return out.to(x.dtype)
-
-
-def frozen_layernorm(module: ModularLayerNorm, x: torch.Tensor) -> torch.Tensor:
-    x_f = x.float()
-    dims = tuple(range(-len(module.normalized_shape), 0))
-    mean = x_f.mean(dim=dims, keepdim=True).detach()
-    var = x_f.var(dim=dims, keepdim=True, unbiased=False).detach()
-    out = (x_f - mean) / (var + module.eps).sqrt() 
-    out = out * module.weight.float()
-    if module.bias is not None:
-        out = out + module.bias.float()
-    return out.to(x.dtype)
-
-
-NORM_FN_MAPPING = {
-    None: layernorm,
-    'frozen': frozen_layernorm,
-}
+        out = self.norm_fn(x, self.normalized_shape, self.eps) * self.weight.float()
+        if self.bias is not None:
+            out = out + self.bias.float()
+        return out.to(x.dtype)

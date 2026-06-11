@@ -5,6 +5,8 @@ import math
 import torch
 import torch.nn.functional as F
 
+from .utils import modular_ctx
+
 
 # ---------------------------------------------------------------------------
 # Rule 2 variants — zero-preserving nonlinearities
@@ -118,8 +120,6 @@ class IntegratedSoftmax(torch.autograd.Function):
 
         return result.to(ctx._orig_dtype), None, None
 
-import torch
-
 class SecantJacobianSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(  # type: ignore[override]
@@ -180,38 +180,106 @@ class SecantJacobianSoftmax(torch.autograd.Function):
         return result.to(ctx._orig_dtype), None, None
 
 # ---------------------------------------------------------------------------
-# Functional wrappers
+# Functional wrappers — standard activations
 # ---------------------------------------------------------------------------
 
+@modular_ctx
+def gelu(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x)
+
+@modular_ctx
+def gelu_tanh(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x, approximate='tanh')
+
+@modular_ctx
+def silu(x: torch.Tensor) -> torch.Tensor:
+    return F.silu(x)
+
+@modular_ctx
+def relu(x: torch.Tensor) -> torch.Tensor:
+    return F.relu(x)
+
+@modular_ctx
+def tanh(x: torch.Tensor) -> torch.Tensor:
+    return torch.tanh(x)
+
+@modular_ctx
+def softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    return F.softmax(x, dim=dim, dtype=dtype)
+
+# ---------------------------------------------------------------------------
+# Functional wrappers — LVP variants
+# ---------------------------------------------------------------------------
+
+@modular_ctx
 def secant_gelu_tanh(x: torch.Tensor) -> torch.Tensor:
     return SecantGELUTanh.apply(x)
 
-
+@modular_ctx
 def secant_silu(x: torch.Tensor) -> torch.Tensor:
     return SecantSiLU.apply(x)
 
+@modular_ctx
 def integrated_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return IntegratedSoftmax.apply(x, dim, dtype)
 
+@modular_ctx
 def sec_jac_softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     return SecantJacobianSoftmax.apply(x, dim, dtype)
 
 # ---------------------------------------------------------------------------
-# Mapping wrappers
+# Mapping
 # ---------------------------------------------------------------------------
 
 ACT_FN = {
     # Standard activations
-    'gelu':           F.gelu,
-    'gelu_tanh':      lambda x: F.gelu(x, approximate='tanh'),
-    'silu':           F.silu,
-    'relu':           F.relu,
-    'tanh':           torch.tanh,
-    'softmax':        F.softmax,
+    'gelu':      gelu,
+    'gelu_tanh': gelu_tanh,
+    'silu':      silu,
+    'relu':      relu,
+    'tanh':      tanh,
+    'softmax':   softmax,
     # Rule 2 — zero-preserving (LVP secant)
     'secant_gelu_tanh': secant_gelu_tanh,
     'secant_silu':      secant_silu,
     # Rule 3 — softmax variants (LVP)
     'sec_jac_softmax':    sec_jac_softmax,
     'integrated_softmax': integrated_softmax,
+}
+
+# ---------------------------------------------------------------------------
+# Functional wrappers — norm non-linearities (centering + scaling only)
+# ---------------------------------------------------------------------------
+
+@modular_ctx
+def rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:  # (..., d) -> (..., d) float32
+    x_f = x.float()
+    return x_f * torch.rsqrt(x_f.pow(2).mean(-1, keepdim=True) + eps)
+
+@modular_ctx
+def frozen_rms_norm(x: torch.Tensor, eps: float) -> torch.Tensor:  # (..., d) -> (..., d) float32
+    x_f = x.float()
+    return x_f * torch.rsqrt(x_f.pow(2).mean(-1, keepdim=True) + eps).detach()
+
+@modular_ctx
+def layer_norm(x: torch.Tensor, normalized_shape: tuple[int, ...], eps: float) -> torch.Tensor:  # (..., d) -> (..., d) float32
+    x_f = x.float()
+    dims = tuple(range(-len(normalized_shape), 0))
+    mean = x_f.mean(dim=dims, keepdim=True)
+    var = x_f.var(dim=dims, keepdim=True, unbiased=False)
+    return (x_f - mean) / (var + eps).sqrt()
+
+@modular_ctx
+def frozen_layer_norm(x: torch.Tensor, normalized_shape: tuple[int, ...], eps: float) -> torch.Tensor:  # (..., d) -> (..., d) float32
+    x_f = x.float()
+    dims = tuple(range(-len(normalized_shape), 0))
+    mean = x_f.mean(dim=dims, keepdim=True).detach()
+    var = x_f.var(dim=dims, keepdim=True, unbiased=False).detach()
+    return (x_f - mean) / (var + eps).sqrt()
+
+NORM_FN = {
+    'rms_norm':          rms_norm,
+    'frozen_rms_norm':   frozen_rms_norm,
+    'layer_norm':        layer_norm,
+    'frozen_layer_norm': frozen_layer_norm,
 }
