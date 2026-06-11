@@ -176,7 +176,7 @@ BILINEAR_FN = {
     # Standard operations
     'mul':    mul,
     'matmul': matmul,
-    # Rule 4 — bilinear (LVP uniform splitting)
+    # Rule 4 — bilinear (uniform splitting)
     'bilinear_mul':    bilinear_mul,
     'bilinear_matmul': bilinear_matmul,
     'ig_mul': ig_mul,

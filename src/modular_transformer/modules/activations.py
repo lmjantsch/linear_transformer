@@ -208,7 +208,7 @@ def softmax(x: torch.Tensor, dim: int = -1, dtype: torch.dtype = torch.float32) 
     return F.softmax(x, dim=dim, dtype=dtype)
 
 # ---------------------------------------------------------------------------
-# Functional wrappers — LVP variants
+# Functional wrappers - modular variants
 # ---------------------------------------------------------------------------
 
 @modular_ctx
@@ -239,10 +239,8 @@ ACT_FN = {
     'relu':      relu,
     'tanh':      tanh,
     'softmax':   softmax,
-    # Rule 2 — zero-preserving (LVP secant)
     'secant_gelu_tanh': secant_gelu_tanh,
     'secant_silu':      secant_silu,
-    # Rule 3 — softmax variants (LVP)
     'sec_jac_softmax':    sec_jac_softmax,
     'integrated_softmax': integrated_softmax,
 }
