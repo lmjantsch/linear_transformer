@@ -35,29 +35,91 @@ class LinearGemma2RMSNorm(nn.Module):
         baseline_hidden = baseline_hidden_hook()
         dynamic_mask = baseline_hidden_hook()
 
-        variance = x_f.pow(2).mean(-1, keepdim=True)
-
         if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
-            if self.norm_approx == 'dynamic_thr':
-                baseline_hidden = baseline_hidden.to(torch.float32)
-                clean_norm = x_f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
-                sim = torch.cosine_similarity(x_f, baseline_hidden, dim=-1).unsqueeze(-1)
-                sin2 = (1 - sim.pow(2)).clamp(min=0)
-                f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
-                dynamic_mask = f_diff >= 0.0
-            rms_term = torch.rsqrt(variance + self.eps)
-            rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
-            output = x_f * rms_term * (1.0 + self.weight.float()).detach()
-            return output.type_as(x)
+            output = self.dynamic_norm(x_f, baseline_hidden, dynamic_mask)
+
+        if self.norm_approx == 'ig' and baseline_hidden is not None:
+            output = IGRMS.apply(x, baseline_hidden, self.eps)
+            output = output * (1.0 + self.weight.float())
 
         # frozen
-        if self.norm_approx == 'frozen':
-            output = x_f * torch.rsqrt(variance + self.eps).detach() * (1.0 + self.weight.float()).detach()
-            return output.type_as(x)
+        elif self.norm_approx == 'frozen':
+            output = self.frozen_norm(x_f)
         # original
-        output = x_f * torch.rsqrt(variance + self.eps) * (1.0 + self.weight.float())
+        else:
+            variance = x_f.pow(2).mean(-1, keepdim=True)
+            output = x_f * torch.rsqrt(variance + self.eps) * (1.0 + self.weight.float())
         return output.type_as(x)
+    
+    def dynamic_norm(self, x_f, baseline_hidden, dynamic_mask):
+        variance = x_f.pow(2).mean(-1, keepdim=True)
+        if self.norm_approx == 'dynamic_thr':
+            baseline_hidden = baseline_hidden.to(torch.float32)
+            clean_norm = x_f.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            scale = baseline_hidden.norm(dim=-1, keepdim=True) / clean_norm
+            sim = torch.cosine_similarity(x_f, baseline_hidden, dim=-1).unsqueeze(-1)
+            sin2 = (1 - sim.pow(2)).clamp(min=0)
+            f_diff = (scale - 1).abs() - ((1 - sim).pow(2) + sin2 * (scale - 1).pow(2)).sqrt()
+            dynamic_mask = f_diff >= 0.0
+        rms_term = torch.rsqrt(variance + self.eps)
+        rms_term = torch.where(dynamic_mask, rms_term, rms_term.detach())
+        output = x_f * rms_term * (1.0 + self.weight.float()).detach()
+        return output
+        
+    def frozen_norm(self, x_f):
+        variance = x_f.pow(2).mean(-1, keepdim=True)
+        output = x_f * torch.rsqrt(variance + self.eps).detach() * (1.0 + self.weight.float()).detach()
+        return output
+    
+class IGRMS(torch.autograd.Function):
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,  # (..., d)
+        baseline_hidden: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:  # (..., d)
+        ctx.save_for_backward(x, baseline_hidden)
+        ctx._orig_dtype = x.dtype
+        ctx._eps = eps
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        output = x.float() * torch.rsqrt(variance + eps).detach()
+        return output
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,  # (..., d)
+    ) -> torch.Tensor:  # (..., d)
+        (x, baseline_hidden) = ctx.saved_tensors
+        x_f, bh_f = x.float(), baseline_hidden.float()
+        eps = ctx._eps
+        grad_f = grad_t.float()
+        
+        d = x_f.shape[-1]
+        delta_x = x_f - bh_f
+        
+        expected_grad_x = torch.zeros_like(x_f)
+        steps = 32
+        
+        for i in range(steps):
+            alpha = (i + 0.5) / steps
+            x_alpha = bh_f + alpha * delta_x
+            
+            variance = x_alpha.pow(2).mean(-1, keepdim=True)
+            v = torch.sqrt(variance + eps)
+            v3 = v.pow(3)
+
+            term1 = grad_f / v
+            dot_prod = (grad_f * x_alpha).sum(-1, keepdim=True)
+            term2 = x_alpha * dot_prod / (d * v3)
+            
+            expected_grad_x += (term1 - term2)
+            
+        expected_grad_x = expected_grad_x / steps
+        return expected_grad_x.to(ctx._orig_dtype), None, None
+
 
 
 class LinearGemma2GeGLU(nn.Module):

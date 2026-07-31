@@ -55,6 +55,11 @@ class FrozenLlama2RMSNorm(nn.Module):
             hidden_states = hidden_states * rms_term
             return self.weight.detach() * hidden_states.to(input_dtype)
 
+        # ig
+        if self.norm_approx == 'ig' and baseline_hidden is not None:
+            output = IGRMS.apply(hidden_states, baseline_hidden, self.variance_epsilon)
+            return self.weight * output.to(input_dtype)
+
         # frozen
         if self.norm_approx == 'frozen':
             hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon).detach()
@@ -63,6 +68,51 @@ class FrozenLlama2RMSNorm(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
+
+
+class IGRMS(torch.autograd.Function):
+    """Integrated-gradient backward through RMSNorm normalization factor."""
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,         # (..., d)
+        baseline_hidden: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:           # (..., d)
+        ctx.save_for_backward(x, baseline_hidden)
+        ctx._orig_dtype = x.dtype
+        ctx._eps = eps
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        return x.float() * torch.rsqrt(variance + eps).detach()
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,    # (..., d)
+    ) -> tuple:
+        (x, baseline_hidden) = ctx.saved_tensors
+        x_f, bh_f = x.float(), baseline_hidden.float()
+        eps = ctx._eps
+        grad_f = grad_t.float()
+
+        d = x_f.shape[-1]
+        delta_x = x_f - bh_f
+        expected_grad = torch.zeros_like(x_f)
+        steps = 32
+
+        for i in range(steps):
+            alpha = (i + 0.5) / steps
+            x_a = bh_f + alpha * delta_x
+            v = (x_a.pow(2).mean(-1, keepdim=True) + eps).sqrt()
+            v3 = v.pow(3)
+            term1 = grad_f / v
+            dot = (grad_f * x_a).sum(-1, keepdim=True)
+            term2 = x_a * dot / (d * v3)
+            expected_grad += term1 - term2
+
+        expected_grad = expected_grad / steps
+        return expected_grad.to(ctx._orig_dtype), None, None
 
 
 class FrozenLlama2SwiGLU(nn.Module):

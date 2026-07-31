@@ -6,6 +6,55 @@ import torch.nn.functional as F
 
 from linear_transformer.models.utils import baseline_hidden_hook
 
+
+class IGLayerNorm(torch.autograd.Function):
+    """Integrated-gradient backward through LayerNorm normalization statistics."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,         # (..., *normalized_shape)
+        baseline_hidden: torch.Tensor,
+        eps: float,
+        dims: tuple,
+    ) -> torch.Tensor:           # (..., *normalized_shape), weight/bias not applied
+        ctx.save_for_backward(x, baseline_hidden)
+        ctx._eps = eps
+        ctx._dims = dims
+        x_f = x.float()
+        mean = x_f.mean(dim=dims, keepdim=True)
+        var = x_f.var(dim=dims, keepdim=True, unbiased=False)
+        return (x_f - mean.detach()) / (var + eps).sqrt().detach()
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_t: torch.Tensor,    # (..., *normalized_shape)
+    ) -> tuple:
+        (x, baseline_hidden) = ctx.saved_tensors
+        x_f, bh_f = x.float(), baseline_hidden.float()
+        eps = ctx._eps
+        dims = ctx._dims
+        grad_f = grad_t.float()
+
+        delta_x = x_f - bh_f
+        expected_grad = torch.zeros_like(x_f)
+        steps = 32
+
+        for i in range(steps):
+            alpha = (i + 0.5) / steps
+            x_a = bh_f + alpha * delta_x
+            mean_a = x_a.mean(dim=dims, keepdim=True)
+            sigma_a = (x_a.var(dim=dims, keepdim=True, unbiased=False) + eps).sqrt()
+            y_a = (x_a - mean_a) / sigma_a
+            # J(x_a)^T @ t = (1/sigma) * [t - mean(t) - y * mean(y*t)]
+            jac_t = (grad_f - grad_f.mean(dim=dims, keepdim=True) - y_a * (y_a * grad_f).mean(dim=dims, keepdim=True)) / sigma_a
+            expected_grad += jac_t
+
+        expected_grad = expected_grad / steps
+        return expected_grad.to(x.dtype), None, None, None
+
+
 class CustomLayerNorm(nn.Module):
 
     def __init__(self, weight: nn.Parameter, bias: nn.Parameter | None, eps: float, normalized_shape: tuple[int, ...],
@@ -36,6 +85,14 @@ class CustomLayerNorm(nn.Module):
         mean = x_f.mean(dim=dims, keepdim=True)
         var = x_f.var(dim=dims, keepdim=True, unbiased=False)
         sigma = (var + self.eps).sqrt()
+
+        # ig
+        if self.norm_approx == 'ig' and baseline_hidden is not None:
+            output = IGLayerNorm.apply(x, baseline_hidden, self.eps, dims)
+            output = output * self.weight.float()
+            if self.bias is not None:
+                output = output + self.bias.float()
+            return output.to(x.dtype)
 
         if self.norm_approx in ('dynamic_thr', 'dynamic_msk') and (baseline_hidden is not None or dynamic_mask is not None):
             if self.norm_approx == 'dynamic_thr':
